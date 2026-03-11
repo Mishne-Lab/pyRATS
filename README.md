@@ -23,22 +23,24 @@ RATS can provide 'gluing' instructions that indicate which two points on the man
 Not only are we able to generate accurate low-dimensional embeddings, this feature allows for manifold denoising by projecting it to lower dimensional spaces and projecting back.
 
 # Example
+A full working example is available [here](https://colab.research.google.com/drive/1nsdjV8lrE5Dg7TI2SZZmWdAMfuFkdw8Q?usp=sharing) on Google Colab.
+You can achieve an equivalent output by installing pyRATS, navigating to the `pyRATS/examples` folder and running:
 ```py
-import pyRATS
-import datasets, vis
+from pyRATS import rats
+import datasets, vis 
 
 # sample 5000 datapoints from a kleinbottle manifold in living in 4d space
 X, labels, _ = datasets.Datasets().kleinbottle4d(n=5000)
 
 # create a RATS object projecting the data to 2d while tearing the manifold
-model = pyRATS.RATS(d=2, k=28, eta_min=5, to_tear=True)
+model = rats.RATS(d=2, k=28, eta_min=5, to_tear=True)
 y = model.fit_transform(X)
 
 # compute the gluing instructions along the tear
 color_of_pts_on_tear = model.compute_color_of_pts_on_tear(y)
 
 # plot the resulting 2d representation of the manifold
-vis.global_embedding(
+vis.Visualize().global_embedding(
   y, labels[:,0],
   color_of_pts_on_tear=color_of_pts_on_tear[:,[0, 1, 2]],
   cmap0='summer', cmap1='jet',
