@@ -1,0 +1,535 @@
+import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.spatial.distance import squareform
+
+from multiprocessing import cpu_count
+
+from pyRATS._utils import (
+    nearest_neighbors,
+    sparse_matrix,
+    kpca,
+    lpca,
+    best,
+    compute_seq_of_views,
+    compute_init_embedding,
+    compute_final_embedding,
+    batched_pdist,
+)
+from pyRATS._tear_coloring import compute_color_of_pts_on_tear
+
+
+class RATS:
+    """Riemannian Alignment of Tangent Spaces
+
+    Parameters
+    ----------
+    d : int
+       Intrinsic dimension of the manifold.
+
+    k : int
+        Neighborhood size for local view fitting.
+
+    to_postprocess : bool, default=True
+        If True, searches for local embeddings that minimize the local distortion.
+        Useful for noisy manifolds.
+
+    kpca_kernel : {'linear', 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default='linear'
+        Kernel used for PCA. See https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.KernelPCA.html for more information.
+
+    cost_fn_name : {'alignment', 'distortion'}, default='alignment'
+        'alignment': Alignment error should be prefered when runtime matters or dealing with noisy manifolds.
+        'distortion': Distortion is slow, but works well on low noise manifolds.
+
+    eta_min : int, default=5
+        Minimum number of points per cluster. A cluster is formed by merging local embeddings that minimize cost_fn_name.
+        Larger clusters improve the runtime, and regularise noisy manifolds.
+        The value must be >= 1.
+
+    eta_max : int, default=25
+        Maximum allowed size of the clusters.
+        The value must be > eta_min.
+
+    to_tear : bool, default=True
+        Whether to tear the manifold.
+
+    nu : int, default=3
+        The ratio of the size of local views in the embedding against those in the data.
+
+    max_iter : int
+        Number of iterations to refine the global embedding.
+        In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
+        For every iteration in max_iter, the alignment of points in the embedding is recomputed and the tear is re-evaluated if to_tear=True.
+
+    max_internal_iter : int
+        The number of internal iterations used by Riemannian Gradient Descent.
+
+    alpha : float
+        The step size used in the Riemannian gradient descent.
+
+    patience : int
+        The number of iterations to wait for error below tolerance
+        to persist before stopping the refinement.
+
+    tol : float
+        The tolerance level for the relative change in the alignment error and the
+        relative change in the size of the tear.
+
+    metric : str, default='euclidean'
+        To be added in future releases. Metric assumed on the embedding. Currently only 'euclidean' is supported.
+
+    kpca_fit_inverse_transform : bool, default=False
+        To be added in future releases. If True, computes the inverse of the embedding transformation.
+        This flag must be only be enabled when running RATS with using the kpca_kernel.
+        If running pca with kpca_kernel=None, kpca_fit_inverse_transform is always True.
+
+    verbose : bool
+        If True, print logs to stdout.
+
+    n_jobs : int, default=-1
+        The number of CPU-cores to use. If -1, uses all available cores.
+
+    """
+
+    def __init__(
+        self,
+        d=2,
+        kpca_kernel=None,
+        kpca_fit_inverse_transform=False,
+        k=28,
+        cost_fn_name="alignment",
+        metric="euclidean",
+        to_postprocess=True,
+        eta_min=5,
+        eta_max=25,
+        to_tear=True,
+        nu=3,
+        max_iter=20,
+        max_internal_iter=100,
+        alpha=0.3,
+        eps=1e-8,
+        patience=5,
+        tol=1e-2,
+        n_connected_manifolds=1,
+        verbose=False,
+        n_jobs=-1,
+    ):
+
+        assert cost_fn_name in ["alignment", "distortion"]
+
+        self.verbose = verbose
+        self.n_jobs = n_jobs
+
+        self.d = d
+        self.kpca_kernel = None if kpca_kernel == "linear" else kpca_kernel
+        self.kpca_fit_inverse_transform = kpca_fit_inverse_transform
+        self.k = k
+        if cost_fn_name == "distortion":
+            self.k_nn0 = max(k, eta_max * k)
+        else:
+            self.k_nn0 = k
+        self.cost_fn = cost_fn_name
+        self.to_postprocess = to_postprocess
+        self.eta_min, self.eta_max = eta_min, eta_max
+        self.to_tear = to_tear
+        self.nu = nu
+        self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
+        self.alpha, self.eps = alpha, eps
+        self.patience, self.tol = patience, tol
+        self.verbose = verbose
+        self.metric = metric
+        self.n_forced_clusters = n_connected_manifolds
+
+        if self.patience is None:
+            self.patience = self.max_iter
+
+        if n_jobs == -1:
+            self.n_jobs = cpu_count()
+
+    def fit_transform(self, X):
+        """Fit the model on the data in X, and transform X.
+
+        Parameters
+        ---------
+        X : array-like, shape (n_samples, n_features)
+            Sample data, in the form of a numpy array of shape (n_samples, n_features).
+
+        Returns
+        -------
+        y : array-like, shape (n_samples, d)
+            X transformed in the new space.
+        """
+
+        self._fit_nbrhd_graph(X)
+
+        # Construct low dimensional local views
+        self._fit_local_views(X)
+        if self.to_postprocess:
+            self._postprocess()
+
+        # Construct intermediate views
+        c, n_C = self._fit_intermediate_views()
+
+        # Construct Global views
+        y = self._fit_global_views(c, n_C)
+
+        return y
+
+    def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[0, 1, 2]):
+        """Compute glueing instructions for the tear.
+
+        Parameters
+        ------
+        y: array-like, shape (n_samples, d)
+            X tranformed in the new space.
+
+        tear_color_eig_inds:
+
+        Returns
+        ------
+            Color of points on tear or None if no tear could be detected.
+
+        """
+        if not self.to_tear:
+            print(
+                "Manifold is not torn. Gluing instructions can only be provided for torn manifolds."
+            )
+            return None
+
+        return compute_color_of_pts_on_tear(
+            y,
+            self.Utilde,
+            self.C,
+            self.n_Utilde_Utilde,
+            tear_color_eig_inds,
+            self.k,
+            self.nu,
+            self.metric,
+            self.verbose,
+            self.n_jobs,
+        )
+
+    def inverse_transform(self, y):
+        NotImplementedError()
+
+    def _fit_nbrhd_graph(self, X, sort_results=True):
+        """Fitting the neighborhood graph.
+
+        Parameters
+        ----------
+        X : array shape (n_samples, n_features)
+            A 2d array containing data representing a manifold.
+
+        sort_results: bool, default=True
+            If True, sorts neighbors by index in ascending order for deterministic behavior.
+
+        """
+
+        self.neigh_dist, self.neigh_ind = nearest_neighbors(
+            X, self.k_nn0, self.metric, sort_results, self.n_jobs
+        )
+
+        self.U = sparse_matrix(  # needed for distortion cost_fn
+            self.neigh_ind[:, : self.k], np.ones((len(X), self.k), dtype=bool)
+        )
+
+        self.neighbor_graph_idcs = sparse_matrix(
+            self.neigh_ind, np.ones((len(X), self.k_nn0), dtype=bool)
+        )  # self.U
+        self.neighborhood_graph = sparse_matrix(self.neigh_ind, self.neigh_dist)
+        self.neighborhood_graph_idcs_sym = self.neighbor_graph_idcs.maximum(
+            self.neighbor_graph_idcs.transpose()
+        )
+        self.neighborhood_graph_sym = self.neighborhood_graph.maximum(
+            self.neighborhood_graph.transpose()
+        )
+
+    def _fit_local_views(self, X):
+        """Project local neighborhoods via (Kernel-) PCA to the intrinsic dimension.
+
+        Parameters
+        ----------
+        X : array shape (n_samples, n_features)
+            A 2d array containing data representing a manifold.
+        """
+
+        n = len(X)
+
+        # Compute local views
+        if self.kpca_kernel:
+            self.param = kpca(
+                X,
+                self.d,
+                sparse_matrix(
+                    self.neigh_ind[:, : self.k], np.ones((n, self.k), dtype=bool)
+                ),
+                self.kpca_kernel,
+                self.kpca_fit_inverse_transform,
+                self.n_jobs,
+                verbose=self.verbose,
+            )
+        else:
+            self.param = lpca(
+                X,
+                self.d,
+                sparse_matrix(
+                    self.neigh_ind[:, : self.k], np.ones((n, self.k), dtype=bool)
+                ),
+                self.n_jobs,
+                verbose=self.verbose,
+            )
+
+        self.param.b = np.ones(n)
+
+    def _fit_intermediate_views(self):
+        """Cluster local views.
+
+        Returns
+        -------
+        c : array-like, shape (n_samples)
+            Holds the cluster index for each datapoint.
+
+        n_C: array-like, shape (n_clusters)
+            Holds the number of datapoints per cluster.
+
+        Notes
+        -------
+        This algorithm is based on the following rules:
+        1) A point can only move into one of its neighbors' clusters.
+        2) A point cannot move into a cluster that is smaller than the cluster it currently belongs to.
+        3) A point always moves to the cluster whose parameterization induces the lowest cost.
+
+        """
+
+        n = self.neighborhood_graph_sym.shape[0]
+        if self.eta_min > 1:
+            c, n_C = best(
+                self.neighborhood_graph_sym,
+                self.U,
+                self.param,
+                self.eta_min,
+                self.eta_max,
+                self.cost_fn,
+                self.verbose,
+                self.n_jobs,
+            )
+            if self.verbose:
+                print("Pruning and cleaning up.")
+            # Prune empty clusters
+            non_empty_C = n_C > 0
+            M = np.sum(non_empty_C)
+            old_to_new_map = np.arange(n)
+            old_to_new_map[non_empty_C] = np.arange(M)
+            c = old_to_new_map[c]
+            n_C = n_C[non_empty_C]
+
+            # Construct a boolean array C s.t. C[m,i] = 1 if c_i == m, 0 otherwise
+            C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(M, n), dtype=bool)
+
+            # Compute intermediate views
+            if self.param.b is not None:
+                self.param.b = self.param.b[non_empty_C]
+            if self.param.Psi is not None:
+                self.param.Psi = self.param.Psi[non_empty_C, :]
+            if self.param.mu is not None:
+                self.param.mu = self.param.mu[non_empty_C, :]
+            if self.param.model is not None:
+                self.param.model = self.param.model[non_empty_C]
+
+            Utilde = C.dot(self.U)
+
+            np.random.seed(42)
+            self.param.noise_seed = np.random.randint(M * M, size=M)
+            if self.verbose:
+                print("Done.")
+        else:
+            c = np.arange(n, dtype=int)
+            C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(n, n), dtype=bool)
+            n_C = np.ones(n, dtype=int)
+            Utilde = self.U.copy()
+            np.random.seed(42)
+            self.param.noise_seed = np.random.randint(n * n, size=n)
+
+        self.Utilde = Utilde
+        self.C = C
+        self.c = c
+
+        return c, n_C
+
+    def _fit_global_views(self, c, n_C):
+        """Align intermediate clusters via Riemannian gradient descent.
+
+        Parameters
+        ----------
+        c : array-like, shape (n_samples)
+            Holds the cluster index for each datapoint.
+
+        n_C: array-like, shape (n_clusters)
+            Holds the number of datapoints per cluster.
+
+        Returns
+        -------
+        y : array-like, shape (n_samples, d)
+            Representation of X in the new space.
+        """
+
+        # Compute |Utilde_{mm'}|
+        n_Utilde_Utilde = self.Utilde.dot(self.Utilde.transpose())
+        n_Utilde_Utilde.setdiag(0)
+        self.n_Utilde_Utilde = n_Utilde_Utilde
+
+        # Compute sequence of intermedieate views
+        seq_of_intermed_views_in_cluster, parents_of_intermed_views_in_cluster, _ = (
+            compute_seq_of_views(
+                self.d,
+                self.Utilde,
+                n_Utilde_Utilde,
+                self.param,
+                self.n_forced_clusters,
+                self.verbose,
+                self.n_jobs,
+            )
+        )
+
+        # Compute initial embedding
+        y_init = compute_init_embedding(
+            self.d,
+            self.Utilde,
+            self.param,
+            seq_of_intermed_views_in_cluster,
+            parents_of_intermed_views_in_cluster,
+            self.C,
+            self.verbose,
+        )
+
+        # apply RGD
+        y_final = compute_final_embedding(
+            y_init,
+            self.d,
+            self.Utilde,
+            self.C,
+            self.param,
+            self.to_tear,
+            self.patience,
+            self.max_iter,
+            self.max_internal_iter,
+            self.tol,
+            self.nu,
+            self.k,
+            self.metric,
+            self.alpha,
+            self.verbose,
+        )
+
+        return y_final
+
+    def _postprocess(self):
+        """Replace high local distortion incuring parameterizations by those of neighboring points."""
+
+        n = self.U.shape[0]
+
+        original_dists = np.empty((n, int((self.k * (self.k - 1) // 2))))
+        for i in range(n):
+            U_i = self.U[i, :].indices
+            d_e_i = self.neighborhood_graph_sym[np.ix_(U_i, U_i)]
+            d_e_mask_ = squareform(d_e_i.toarray())
+            original_dists[i] = d_e_mask_  # These can be stored and reused
+
+        embedded_datapoints = self.param.batched_eval_(
+            {
+                "view_index": range(n),
+                "data_mask": self.U.indices.reshape(n, self.k),
+            }
+        )  # tested and they are equivalent
+        embedded_dists = batched_pdist(embedded_datapoints)
+        disc_lip_const = np.divide(
+            embedded_dists,
+            original_dists,
+            out=np.full_like(embedded_dists, np.nan),
+            where=original_dists != 0,
+        )
+        zeta = np.nanmax(disc_lip_const, axis=1) / (
+            np.nanmin(disc_lip_const, axis=1) + 1e-12
+        )
+
+        self.param.zeta = zeta
+
+        if self.verbose:
+            print(
+                r"Maximum local distoriton before postptocessing is: %0.4f"
+                % np.max(zeta)
+            )
+
+        connectivity_matrix = self.U.indices.reshape(n, -1)
+        param_changed = np.arange(n)
+        future_use_phi_of = np.arange(n, dtype=int)
+        future_use_phi_of_ = np.arange(n, dtype=int)
+
+        while len(param_changed) > 0:
+            reconsider_mask = np.isin(connectivity_matrix, param_changed) & (
+                connectivity_matrix != np.arange(n)[:, None]
+            )
+            param_changed = np.array([])
+
+            for i in range(connectivity_matrix.shape[1]):
+
+                use_phi_of = connectivity_matrix[:, i][
+                    reconsider_mask[:, i]
+                ]  # select neighborhood indices of the Phi's to use
+                if len(use_phi_of) == 0:
+                    continue
+                neighbors_to_reconsider = connectivity_matrix[
+                    reconsider_mask[:, i]
+                ]  # select datapoint and neighborhood indices who's neighborhood must be re-evaluated
+                points_to_reconsider = np.where(reconsider_mask[:, i])[
+                    0
+                ]  # list of indices
+
+                batch_embedded_datapoints = self.param.batched_eval_(
+                    {
+                        "view_index": future_use_phi_of[use_phi_of],
+                        "data_mask": neighbors_to_reconsider,
+                    }
+                )
+                batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
+                batch_original_dists = original_dists[points_to_reconsider]
+
+                disc_lip_const = np.divide(
+                    batch_embedded_dists,
+                    batch_original_dists,
+                    out=np.full_like(batch_embedded_dists, np.nan),
+                    where=batch_original_dists != 0,
+                )
+                zeta_ = np.nanmax(disc_lip_const, axis=1) / (
+                    np.nanmin(disc_lip_const, axis=1) + 1e-12
+                )
+
+                swap_has_improved_point = points_to_reconsider[
+                    np.where(zeta_ < zeta[points_to_reconsider])[0]
+                ]  # indices of points where swapping by the i'th neighbor improves the local distortion
+
+                param_changed = np.union1d(param_changed, swap_has_improved_point)
+                zeta[points_to_reconsider] = np.minimum(
+                    zeta_, zeta[points_to_reconsider]
+                )
+
+                future_use_phi_of_[swap_has_improved_point] = future_use_phi_of[
+                    connectivity_matrix[:, i][swap_has_improved_point]
+                ]
+
+            future_use_phi_of = (
+                future_use_phi_of_.copy()
+            )  # this is necessary for some reason
+            if self.verbose:
+                print(
+                    "#Param replaced: %d, max distortion: %f"
+                    % (len(param_changed), np.max(zeta))
+                )
+
+        self.param.zeta = zeta.copy()
+
+        self.param.replace_(future_use_phi_of)
+        if self.verbose:
+            print(
+                f"Maximum local distoriton after post-processing is: %0.4f"
+                % (np.max(self.param.zeta))
+            )

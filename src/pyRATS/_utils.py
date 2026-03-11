@@ -1,0 +1,1706 @@
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
+from scipy.linalg import svd, svdvals
+from scipy.sparse.linalg import svds
+from sklearn.decomposition import KernelPCA
+from scipy.sparse import csr_matrix, triu
+import itertools
+
+from joblib import delayed, Parallel
+import multiprocess as mp
+from multiprocess import shared_memory
+
+from scipy.sparse.linalg import svds
+from scipy.linalg import svd
+
+from scipy.spatial.distance import pdist, squareform
+from scipy.sparse import csr_matrix, block_diag
+from sklearn.utils.extmath import svd_flip
+from scipy.sparse.csgraph import (
+    minimum_spanning_tree,
+    connected_components,
+    breadth_first_order,
+)
+
+
+def lpca(X, d, U, n_jobs, verbose=False):
+    """Fit PCA model on the data X.
+
+    Parameters
+    ------
+    X : array-like, shape (n_samples, n_features)
+        Sample data, in the form of a numpy array of shape (n_samples, n_features).
+
+    d : int
+       Intrinsic dimension of the manifold.
+
+    U : array-like, shape (n_samples, n_neighbors)
+        Indices of neighboring points for each point point.
+
+    n_jobs : int
+        Maximum number of processes to spawn.
+
+    verbose : bool, default=False
+        Write logs to stdout.
+
+    Returns
+    ------
+    param : object
+        Param object holding the model which stores the PCA transform.
+
+    Notes
+    ------
+    PCA transformation is stored in param.Psi;
+    demeaning translation is stored in param.mu.
+    """
+
+    n, p = X.shape
+
+    param = Param("lpca")
+    param.X = X
+    param.Psi = np.zeros((n, p, d))
+    param.mu = np.zeros((n, p))
+    param.var_explained = np.zeros((n, p))
+    param.n_pc_dir_chosen = np.zeros(n)
+
+    def target_proc(p_num, chunk_sz):
+        start_ind = p_num * chunk_sz
+        if p_num == (n_jobs - 1):
+            end_ind = n
+        else:
+            end_ind = (p_num + 1) * chunk_sz
+
+        n_inds = end_ind - start_ind
+        Psi = np.zeros((n_inds, p, d))
+        mu = np.zeros((n_inds, p))
+        var_explained = np.zeros((n_inds, p))
+        n_pc_dir_chosen = np.zeros(n_inds)
+
+        for k in range(
+            start_ind, end_ind
+        ):  # TODO: we can very easily get rid of this loop
+            i = k - start_ind
+
+            U_k = U[k, :].indices
+            X_k = X[U_k, :]
+
+            xbar_k = np.mean(X_k, axis=0)[np.newaxis, :]
+            X_k = (X_k - xbar_k).T
+            d1 = d
+            if d in X_k.shape:
+                Q_k, Sigma_k, _ = svd(X_k)
+            else:
+                np.random.seed(42)
+                v0 = np.random.uniform(0, 1, np.min(X_k.shape))
+                Q_k, Sigma_k, _ = svds(X_k, k=d, which="LM", v0=v0)
+
+            var_explained[i, :d] = Sigma_k**2
+            var_explained[i, :d] /= np.sum(var_explained[i, :d])
+            n_pc_dir_chosen[i] = d1
+
+            Psi[i, :, :d1] = Q_k[:, :d1]
+            mu[i, :] = xbar_k
+
+        return start_ind, end_ind, Psi, mu, var_explained, n_pc_dir_chosen
+
+    chunk_sz = int(n / n_jobs)
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(target_proc)(i, chunk_sz) for i in range(n_jobs)
+    )
+    results = [target_proc(0, n)]
+
+    for i in range(len(results)):
+        start_ind, end_ind, Psi_, mu_, var_explained_, n_pc_dir_chosen_ = results[i]
+        param.Psi[start_ind:end_ind, :] = Psi_
+        param.mu[start_ind:end_ind, :] = mu_
+        param.var_explained[start_ind:end_ind, :] = var_explained_
+        param.n_pc_dir_chosen[start_ind:end_ind] = n_pc_dir_chosen_
+
+    if verbose:
+        print("local_param: all %d points processed..." % n)
+
+    return param
+
+
+def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
+    """Fit Kernel PCA models to the data X. Uses sklearn.decomposition.KernelPCA under the hood.
+
+    Parameters
+    ------
+    X : array-like, shape (n_samples, n_features)
+            Sample data, in the form of a numpy array of shape (n_samples, n_features).
+
+    d : int
+       Intrinsic dimension of the manifold.
+
+    U : array-like, shape (n_samples, n_neighbors)
+        Indices of neighboring points for each point point.
+
+    kpca_kernel : {'linear', 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default='linear'
+        Kernel used for PCA. See https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.KernelPCA.html for more information.
+
+    kpca_fit_inverse_transform : bool, default=False
+        When True, computes the inverse of the embedding transformation.
+        This flag must be only be enabled when running RATS with using the kpca_kernel.
+        If running pca with kpca_kernel=None, kpca_fit_inverse_transform is always True.
+
+    n_jobs : int
+        Maximum number of processes to spawn.
+
+    verbose : bool, default-False
+        Write logs to stdout.
+
+    Returns
+    ------
+    param : object
+        Param object holding the model which stores the PCA transform.
+
+    Notes
+    ------
+    Transformations are stored as an sklearn.decomposition.KernelPCA model.
+    """
+
+    n, p = X.shape
+
+    local_param = Param("lkpca")
+    local_param.X = X
+    local_param.model = np.empty(n, dtype=object)
+    local_param.zeta = np.zeros(n)
+
+    def target_proc(p_num, chunk_sz, q_):
+        start_ind = p_num * chunk_sz
+        if p_num == (n_jobs - 1):
+            end_ind = n
+        else:
+            end_ind = (p_num + 1) * chunk_sz
+
+        model_ = np.empty(end_ind - start_ind, dtype=object)
+        for k in range(start_ind, end_ind):
+            model_[k - start_ind] = KernelPCA(
+                n_components=d,
+                kernel=kernel,
+                eigen_solver="arpack",
+                random_state=42,
+                fit_inverse_transform=fit_inverse_transform,
+            )
+            U_k = U[k]
+            X_k = X[U_k, :]
+            model_[k - start_ind].fit(X_k)
+        q_.put((start_ind, end_ind, model_))
+
+    q_ = mp.Queue()
+    chunk_sz = int(n / n_jobs)
+    proc = []
+    for p_num in range(n_jobs):
+        proc.append(
+            mp.Process(target=target_proc, args=(p_num, chunk_sz, q_), daemon=True)
+        )
+        proc[-1].start()
+
+    for p_num in range(n_jobs):
+        start_ind, end_ind, model_ = q_.get()
+        local_param.model[start_ind:end_ind] = model_
+
+    q_.close()
+
+    for p_num in range(n_jobs):
+        proc[p_num].join()
+
+    if verbose:
+        print("local_param: all %d points processed..." % n)
+    return local_param
+
+
+def sparse_matrix(indices, values):
+    """Construct a sparse matrix with entries at neigh_ind and values of neigh_dist
+
+    Parameters
+    ------
+    indices : array-like or sparse-matrix
+        Indices where the sparse matrix should store elements.
+
+    values ; array-like, shape (n_samples, n_values)
+        Values of the sparse matrix.
+
+    Returns
+    ------
+    Sparse matrix of shape (n_samples, n_samples)
+    """
+    if indices.dtype == "object":
+        row_inds = []
+        col_inds = []
+        data = []
+        for k in range(indices.shape[0]):
+            row_inds.append(np.repeat(k, indices[k].shape[0]).tolist())
+            col_inds.append(indices[k].tolist())
+            data.append(values[k].tolist())
+        row_inds = list(itertools.chain.from_iterable(row_inds))
+        col_inds = list(itertools.chain.from_iterable(col_inds))
+        data = list(itertools.chain.from_iterable(data))
+    else:
+        row_inds = np.repeat(np.arange(values.shape[0]), values.shape[1])
+        col_inds = indices.flatten()
+        data = values.flatten()
+    return csr_matrix((data, (row_inds, col_inds)))
+
+
+def batched_pdist(x):
+    """Computes all pairwise euclidean distances of elements in x per batch.
+
+    Parameter
+    ------
+    x : array-like, shape (n, k, d)
+        n-batches of k-vectors of length d
+
+    Returns
+    ------
+    Numpy array of euclidean distances between all pairs of vectors within a batch, shape (n, k*(k-1)/2).
+
+    """
+
+    if not isinstance(x, np.ndarray):
+        x = np.array(x)
+
+    n, k, _ = x.shape
+    res = np.empty((n, k * (k - 1) // 2))
+    p = 0
+    for i in range(k):
+        a = x[:, i]
+        bs = x[:, i + 1 :]
+
+        cs = bs - a[:, None, :]
+        res[:, p : p + k - i - 1] = np.sum(cs * cs, axis=-1)
+        p += k - i - 1
+    return np.sqrt(res)
+
+
+def batched_procrustes_cost(X, Y):
+    """Computes the cost of alignment between elements in X and Y
+
+    Parameters
+    ------
+    X : array-like, shape (b, n, d)
+
+    Y : array-like, shape (b, n, d)
+
+    Returns
+    ------
+    Array of costs of procrustes alignment between X and Y, shape (b)
+
+    Notes
+    ------
+    Supports broadcasting of the batch dimension of either X or Y.
+    """
+
+    muX = X.mean(1)
+    muY = Y.mean(1)
+
+    X0 = X - muX[:, None, ...]
+    Y0 = Y - muY[:, None, ...]
+
+    A = np.matmul(X0.transpose(0, 2, 1), Y0)
+    S = np.linalg.svdvals(A)
+
+    c = np.sum(X0**2, axis=(1, 2)) + np.sum(Y0**2, axis=(1, 2)) - 2 * np.sum(S, axis=1)
+    return c
+
+
+def custom_procrustes_batched(X, Y):
+    """Computes the cost of alignment between elements in X and Y
+
+    Parameters
+    ------
+    X : array-like, shape (b, n, d)
+
+    Y : array-like, shape (b, n, d)
+
+    Returns
+    ------
+    Array of costs of procrustes alignment between X and Y, shape (b)
+
+    Notes
+    ------
+    Supports broadcasting of the batch dimension of either X or Y.
+    """
+    muX = X.mean(1)
+    muY = Y.mean(1)
+
+    X0 = X - muX[:, None, ...]
+    Y0 = Y - muY[:, None, ...]
+
+    A = np.matmul(X0.transpose(0, 2, 1), Y0)
+    _, S, _ = np.linalg.svd(A, full_matrices=False)
+
+    c = np.sum(X0**2, axis=(1, 2)) + np.sum(Y0**2, axis=(1, 2)) - 2 * np.sum(S, axis=1)
+    return c
+
+
+def nearest_neighbors(X, k, metric, sort_results=True, n_jobs=-1):
+    """Fitting the neighborhood graph.
+
+    Parameters
+    ------
+    X : array shape (n_samples, n_features)
+        A 2d array containing data representing a manifold.
+
+    k : int
+        Number of neighbors of each point.
+
+    metric : str
+        Distance metric
+
+    sort_results: bool, default=True
+        Sorts neighbors by index in ascending order.
+
+    n_jobs : int, default=-1
+        Maximum number of processes to use
+
+    Returns
+    ------
+    neigh_dist: array-like, shape (n_samples, k)
+        Distances between neighbors
+
+    neigh_ind: array-like, shape (n_samples, k)
+        Indices of neighbors
+
+    """
+
+    n = len(X)
+    if k > 1:
+        neigh = NearestNeighbors(n_neighbors=k - 1, metric=metric, n_jobs=n_jobs)
+        neigh.fit(X)
+        neigh_dist, neigh_ind = neigh.kneighbors()
+        neigh_dist = np.insert(neigh_dist, 0, np.zeros(n), axis=1)
+        neigh_ind = np.insert(neigh_ind, 0, np.arange(n), axis=1)
+        if sort_results:  # switch on for determinism
+            inds = np.argsort(neigh_dist, axis=-1)
+            for i in range(neigh_ind.shape[0]):
+                neigh_ind[i, :] = neigh_ind[i, inds[i, :]]
+                neigh_dist[i, :] = neigh_dist[i, inds[i, :]]
+    else:
+        neigh_dist = np.zeros((n, 1))
+        neigh_ind = np.arange(n).reshape((n, 1)).astype("int")
+
+    return neigh_dist, neigh_ind
+
+
+def cost_of_moving_distortion(
+    k, d_e, neigh_ind_k, U_k, local_param, c, n_C, Utilde, eta_min, eta_max
+):
+    """Computes the minimum cost and destination cluster possible
+    when merging k with its neighboring clusters.
+
+    Parameters
+    ------
+    k : int
+        Index of point
+
+    d_e : sparse matrix, shape (n_samples, n_samples)
+        Distance matrix between neighbors
+
+    neigh_ind_k : array-like, shape (n_neighbors)
+        List of neighbor indices of point k.
+
+    U_k : array-like, shape (n_neighbors)   # FIXME: superfluous, test global distortion with Utilde[k] and c_k
+        List of neighbor indices of point k.
+
+    param : Param object
+        Stores the parameterizations for each point.
+
+    c : array-like (n_samples)
+        Array of indices that map from datapoint to cluster.
+
+    n_C : array-like, shape (n_samples)
+        Array of indices that map from cluster to number of points per cluster
+
+    Utilde : list
+        List of neighbor indices for each sample.
+
+    eta_min : int
+        Minimum allowed size of the clusters underlying the intermediate views.
+        The values must be >= 1.
+
+    eta_max : int
+        Maximum allowed size of the clusters underlying the intermediate views.
+        The value must be > eta_min.
+
+    Returns
+    ------
+    cost_k : float
+        Minmum cost of moving from k to its neighbor's cluster
+
+    dest_k : int
+        Destination cluster index
+
+    """
+
+    c_k = c[k]
+    # Compute |C_{c_k}|
+    n_C_c_k = n_C[c_k]
+
+    # Check if |C_{c_k}| < eta_{min}
+    # If not then c_k is already
+    # an intermediate cluster
+    if n_C_c_k >= eta_min:
+        return np.inf, -1
+
+    # Compute neighboring clusters c_{U_k} of x_k
+    c_U_k = c[neigh_ind_k]
+    c_U_k_uniq = np.unique(c_U_k).tolist()
+    cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
+
+    U_k_list = list(U_k)
+
+    # Iterate over all m in c_{U_k}
+    i = 0
+    for m in c_U_k_uniq:
+        if m == c_k:
+            i += 1
+            continue
+
+        # Compute |C_{m}|
+        n_C_m = n_C[m]
+        # Check if |C_{m}| < eta_{max}. If not
+        # then mth cluster has reached the max
+        # allowed size of the cluster. Move on.
+        if n_C_m >= eta_max:
+            i += 1
+            continue
+
+        # Check if |C_{m}| >= |C_{c_k}|. If yes, then
+        # mth cluster satisfies all required conditions
+        # and is a candidate cluster to move x_k in.
+        if n_C_m >= n_C_c_k:
+            # Compute union of Utilde_m U_k
+            U_k_U_Utilde_m = list(U_k.union(Utilde[m]))
+            # Compute the cost of moving x_k to mth cluster,
+            # that is cost_{x_k \rightarrow m}
+            cost_x_k_to[i] = compute_zeta(
+                d_e[np.ix_(U_k_U_Utilde_m, U_k_U_Utilde_m)],
+                local_param.eval_({"view_index": m, "data_mask": U_k_U_Utilde_m}),
+            )
+
+        i += 1
+
+    # find the cluster with minimum cost
+    # to move x_k in.
+    dest_k = np.argmin(cost_x_k_to)
+    cost_k = cost_x_k_to[dest_k]
+    if cost_k == np.inf:
+        dest_k = -1
+    else:
+        dest_k = c_U_k_uniq[dest_k]
+
+    return cost_k, dest_k
+
+
+def compute_zeta(d_e_mask0, Psi_k_mask):
+    d_e_mask = d_e_mask0.toarray()
+    if d_e_mask.shape[0] == 1:
+        return 1
+    d_e_mask_ = squareform(d_e_mask)
+    mask = d_e_mask_ != 0
+    d_e_mask_ = d_e_mask_[mask]
+    disc_lip_const = pdist(Psi_k_mask)[mask] / d_e_mask_
+    return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
+
+
+# TODO: whats the difference between neigh_ind_k and U_k?
+def cost_of_moving_alignment_error(
+    k, d_e, neigh_ind_k, U_k, param, c, n_C, Utilde, eta_min, eta_max
+):
+    """Computes the minimum cost and destination cluster possible
+    when merging k with its neighboring clusters.
+
+    Parameters
+    ------
+    k : int
+        Index of point
+
+    d_e : sparse matrix, shape (n_samples, n_samples)
+        Distance matrix between neighbors
+
+    neigh_ind_k : array-like, shape (n_neighbors)
+        List of neighbor indices of point k.
+
+    U_k : array-like, shape (n_neighbors)   # FIXME: superfluous, test global distortion with Utilde[k] and c_k
+        List of neighbor indices of point k.
+
+    param : Param object
+        Stores the parameterizations for each point.
+
+    c : array-like (n_samples)
+        Array of indices that map from datapoint to cluster.
+
+    n_C : array-like, shape (n_samples)
+        Array of indices that map from cluster to number of points per cluster
+
+    Utilde : list
+        List of neighbor indices for each sample.
+
+    eta_min : int
+        Minimum allowed size of the clusters underlying the intermediate views.
+        The values must be >= 1.
+
+    eta_max : int
+        Maximum allowed size of the clusters underlying the intermediate views.
+        The value must be > eta_min.
+
+    Returns
+    ------
+    cost_k : float
+        Minmum cost of moving from k to its neighbor's cluster
+
+    dest_k : int
+        Destination cluster index
+
+    """
+
+    c_k = c[k]
+    # Compute |C_{c_k}|
+    n_C_c_k = n_C[c_k]
+
+    # Check if |C_{c_k}| < eta_{min}
+    # If not then c_k is already
+    # an intermediate cluster
+    if n_C_c_k >= eta_min:
+        return np.inf, -1
+
+    # Compute neighboring clusters c_{U_k} of x_k
+    c_U_k = c[neigh_ind_k]
+    c_U_k_uniq = np.unique(c_U_k)
+    cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
+
+    U_k_list = list(U_k)
+
+    neighbor_mask = (
+        (n_C[c_U_k_uniq] < eta_max) & (n_C[c_U_k_uniq] >= n_C_c_k) & (c_U_k_uniq != c_k)
+    )
+
+    # c_U_k_uniq_k = np.union1d(c_U_k_uniq[neighbor_mask], c_k)
+    c_U_k_uniq_k = np.union1d(c_U_k_uniq[neighbor_mask], k)
+    evals = param.batched_eval_(
+        {
+            "view_index": c_U_k_uniq_k,
+            "data_mask": np.broadcast_to(U_k_list, [len(c_U_k_uniq_k), len(U_k_list)]),
+        }
+    )
+
+    m = c_U_k_uniq_k == k
+    cost_x_k_to[neighbor_mask] = custom_procrustes_batched(
+        evals[~m] if len(c_U_k_uniq_k) > neighbor_mask.sum() else evals, evals[m]
+    )
+
+    # find the cluster with minimum cost
+    # to move x_k in.
+    dest_k = np.argmin(cost_x_k_to)
+    cost_k = cost_x_k_to[dest_k]
+    if cost_k == np.inf:
+        dest_k = -1
+    else:
+        dest_k = c_U_k_uniq[dest_k]
+
+    return cost_k, dest_k
+
+
+def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
+    """Greedy merging points to form clusters.
+
+    Parameters
+    ------
+    d_e : sparse-matrix
+        Symmetric matrix of distances between neighboring points
+
+    U : sparse-matrix
+        Matrix of indices of neighboring points
+
+    param: Param object
+        Stores the parameterizations for each point.
+
+    eta_min : int, default=5
+        Minimum number of points per cluster. A cluster is formed by merging local embeddings that minimize cost_fn_name.
+        Larger clusters improve the runtime, and regularise noisy manifolds.
+        The value must be >= 1.
+
+    eta_max : int, default=25
+        Maximum allowed size of the clusters.
+        The value must be > eta_min.
+
+    cost_fn_name : {'alignment', 'distortion'}, default='alignment'
+        'alignment': Alignment error should be prefered when runtime matters or dealing with noisy manifolds.
+        'distortion': Distortion is slow, but works well on low noise manifolds.
+
+    verbose : bool
+        If True, print logs to stdout.
+
+    n_jobs : int
+        Maximum number of of processes allowed.
+
+    Returns
+    ______
+
+    c : array-like, shape (n_samples)
+        The cluster index for each datapoint.
+
+    n_C: array-like, shape (n_clusters)
+        The number of datapoints per cluster.
+    """
+
+    assert cost_fn in [
+        "alignment",
+        "distortion",
+    ], f"{cost_fn} is not implemented. Choose between 'alignment' and 'distortion'."
+    cost_of_moving = (
+        cost_of_moving_alignment_error
+        if cost_fn == "alignment"
+        else cost_of_moving_distortion
+    )
+
+    n = d_e.shape[0]
+    c = np.arange(n)
+    n_C = np.zeros(n) + 1
+    Clstr = list(map(set, np.arange(n).reshape((n, 1)).tolist()))
+    indices = U.indices
+    indptr = U.indptr
+    Utilde = []
+    U_ = []
+    neigh_ind = []
+    for i in range(n):
+        col_inds = indices[indptr[i] : indptr[i + 1]]
+        Utilde.append(set(col_inds))
+        U_.append(set(col_inds))
+        neigh_ind.append(col_inds)
+
+    neigh_ind = np.array(neigh_ind)
+
+    cost = np.zeros(n) + np.inf
+    dest = np.zeros(n, dtype="int") - 1
+
+    shm_cost = shared_memory.SharedMemory(create=True, size=cost.nbytes)
+    np_cost = np.ndarray(cost.shape, dtype=cost.dtype, buffer=shm_cost.buf)
+    np_cost[:] = cost[:]
+    shm_dest = shared_memory.SharedMemory(create=True, size=dest.nbytes)
+    np_dest = np.ndarray(dest.shape, dtype=dest.dtype, buffer=shm_dest.buf)
+    np_dest[:] = dest[:]
+
+    shm_cost_name = shm_cost.name
+    cost_shape = cost.shape
+    cost_dtype = cost.dtype
+    shm_dest_name = shm_dest.name
+    dest_shape = dest.shape
+    dest_dtype = dest.dtype
+
+    # Vary eta from 2 to eta_{min}
+    if verbose:
+        print("Constructing intermediate views.")
+    for eta in range(2, eta_min + 1):
+        if verbose:
+            print("eta = %d." % eta)
+            print(
+                "#non-empty views with sz < %d = %d"
+                % (eta, np.sum((n_C > 0) * (n_C < eta)))
+            )
+            print("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
+
+        def target_proc(p_num, chunk_sz, n_, Utilde, n_C, c, S):
+            existing_shm_cost = shared_memory.SharedMemory(name=shm_cost_name)
+            cost_ = np.ndarray(
+                cost_shape, dtype=cost_dtype, buffer=existing_shm_cost.buf
+            )
+            existing_shm_dest = shared_memory.SharedMemory(name=shm_dest_name)
+            dest_ = np.ndarray(
+                dest_shape, dtype=dest_dtype, buffer=existing_shm_dest.buf
+            )
+
+            start_ind = p_num * chunk_sz
+            if p_num == (n_jobs - 1):
+                end_ind = n_
+            else:
+                end_ind = (p_num + 1) * chunk_sz
+
+            for k in range(start_ind, end_ind):
+                if S is None:
+                    k1 = k
+                else:
+                    k1 = S[k]
+                cost_[k1], dest_[k1] = cost_of_moving(
+                    k1, d_e, neigh_ind[k1], U_[k1], param, c, n_C, Utilde, eta, eta_max
+                )
+
+        proc = []
+        chunk_sz = int(n / n_jobs)
+        for p_num in range(n_jobs):
+            proc.append(
+                mp.Process(
+                    target=target_proc,
+                    args=(p_num, chunk_sz, n, Utilde, n_C, c, None),
+                    daemon=True,
+                )
+            )
+            proc[-1].start()
+
+        for p_num in range(n_jobs):
+            proc[p_num].join()
+
+        # Compute point with minimum cost
+        # Compute k and cost^*
+        k = np.argmin(np_cost)
+        cost_star = np_cost[k]
+
+        if verbose:
+            print("Costs computed when eta = %d." % eta)
+
+        # Loop until minimum cost is inf
+        total_len_S = 0
+        ctr = 0
+        while cost_star < np.inf:
+            # print(k, cost_star, flush=True)
+            # Move x_k from cluster s to
+            # dest_k and update variables
+            s = c[k]
+            dest_k = np_dest[k]
+            c[k] = dest_k
+            n_C[s] -= 1
+            n_C[dest_k] += 1
+            Clstr[s].remove(k)
+            Clstr[dest_k].add(k)
+            Utilde[dest_k] = U_[k].union(Utilde[dest_k])
+            Utilde[s] = set(itertools.chain.from_iterable(neigh_ind[list(Clstr[s])]))
+
+            # Compute the set of points S for which
+            # cost of moving needs to be recomputed
+            if n_C[s] > 0:
+                S_ = (
+                    (c == dest_k)
+                    | (np_dest == dest_k)
+                    | np.array(U[:, list(Clstr[s])].sum(1), dtype=bool).flatten()
+                )
+            else:
+                S_ = (c == dest_k) | (np_dest == dest_k) | (np_dest == s)
+            S = np.where(S_)[0].tolist()
+            len_S = len(S)
+            total_len_S += len_S
+            ctr += 1
+
+            for k in S:
+                np_cost[k], np_dest[k] = cost_of_moving(
+                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
+                )
+
+            k = np.argmin(np_cost)
+            cost_star = np_cost[k]
+
+        if verbose:
+            print(
+                "ctr=%d, total_len_S=%d, avg_len_S=%0.3f"
+                % (ctr, total_len_S, total_len_S / (ctr + 1e-12))
+            )
+            print(
+                "Remaining #nodes in views with sz < %d = %d"
+                % (eta, np.sum(n_C[c] < eta))
+            )
+            print("Done with eta = %d." % eta)
+
+    shm_cost.close()
+    shm_cost.unlink()
+    shm_dest.close()
+    shm_dest.unlink()
+    return c, n_C
+
+
+def compute_seq_of_views(
+    d,  # embedding dimension
+    i_mat,  # incidence matrix |#views| x |#points|
+    overlap,  # size of overlap between views |#views| x |#views|
+    param,  # d-dimensional parameterization of points in each view
+    n_forced_clusters,
+    verbose,
+    n_jobs,
+):
+    """Connect intermediate views to a tree structure.
+
+    Parameters
+    ------
+    d : int
+        Embedding dimension
+
+    i_mat : sparse-matrix, shape (n_samples, n_intermed_views)
+        Incidence matrix
+
+    overlap : sparse-matrix, shape (n_intermed_views, n_intermed_views)
+        Size of overlap between intermediate views
+
+    param : Param object
+        Stores parameterizations for each point
+
+    n_forced_clusters : int
+        Minimum no. of clusters to force in the embeddings.
+
+    verbose : bool
+        If True, print logs to stdout.
+
+    n_jobs : int
+        Maximum number of processes to use.
+
+    Return
+    ------
+    seq_of_views_in_cluster : array-like, shape (n_samples)
+
+    parents_of_views_in_cluster : array-like, shape (n_samples)
+
+    cluster_of_view : array-like, shape (n_samples)
+
+    """
+
+    n_views = i_mat.shape[0]
+
+    # W_{mm'} = W_{m'm} measures the ambiguity between
+    # the two embeddings of the points on the overlap
+    # between mth and m'th intermediate views
+    W_rows, W_cols = triu(overlap).nonzero()
+    n_elem = W_rows.shape[0]
+    overlap_svals = np.zeros((n_elem, d))
+    chunk_sz = int(n_elem / n_jobs)
+
+    def target_proc(p_num):
+        start_ind = p_num * chunk_sz
+        if p_num == (n_jobs - 1):
+            end_ind = n_elem
+        else:
+            end_ind = (p_num + 1) * chunk_sz
+        overlap_svals_ = np.zeros((end_ind - start_ind, d))
+        for i in range(start_ind, end_ind):
+            m = W_rows[i]
+            mpp = W_cols[i]
+            mask = i_mat[m, :].multiply(i_mat[mpp, :]).nonzero()[1]
+            V_mmp = param.eval_({"view_index": m, "data_mask": mask})
+            V_mpm = param.eval_({"view_index": mpp, "data_mask": mask})
+            Vbar_mmp = V_mmp - np.mean(V_mmp, 0)[np.newaxis, :]
+            Vbar_mpm = V_mpm - np.mean(V_mpm, 0)[np.newaxis, :]
+            # Compute ambiguity of the overlaps captured by singular values
+            svdvals_ = svdvals(np.dot(Vbar_mmp.T, Vbar_mpm))
+            # overlap_svals_[i-start_ind] = svdvals_[-1]
+            overlap_svals_[i - start_ind, :] = svdvals_
+        return (start_ind, end_ind, overlap_svals_)
+
+    res = Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
+        delayed(target_proc)(p_num) for p_num in range(n_jobs)
+    )
+    for value in res:
+        start_ind, end_ind, overlap_svals_ = value
+        overlap_svals[start_ind:end_ind, :] = overlap_svals_
+
+    # overlap_svals[overlap_svals<tol] = 0
+    W_data = overlap_svals[:, -1]
+    for i in range(overlap_svals.shape[1] - 2, -1, -1):
+        mask = W_data == 0
+        if verbose:
+            print(
+                "Iter:",
+                i,
+                ":: Updating scores of",
+                np.sum(mask),
+                "edges out of",
+                W_data.shape[0],
+                "edges.",
+            )
+        n_zero_elem = np.sum(mask)
+        if n_zero_elem == 0:
+            break
+        temp = overlap_svals[mask, i]
+        if n_zero_elem < len(W_data):
+            temp2 = 0.5 * W_data[~mask]
+            W_data[mask] = temp * (np.min(temp2) / (np.max(temp) + 1e-12))
+        else:
+            W_data[mask] = temp
+
+    W = csr_matrix(
+        (W_data, (W_rows, W_cols)), shape=(n_views, n_views)
+    )  # strict upper triangular
+    W = W + W.T
+
+    n_comp, comp_labels = connected_components(W, directed=False, return_labels=True)
+
+    # Remove edges to force clusters if desired
+    if n_forced_clusters > n_comp:
+        inds = np.argsort(W.data)[-(n_forced_clusters - n_comp) :]
+        W.data[inds] = 0
+        W.eliminate_zeros()
+        n_comp, comp_labels = connected_components(
+            W, directed=False, return_labels=True
+        )
+
+    if verbose:
+        print("No. of connected components (manifolds):", n_comp)
+
+    # Create a sequence of views for each cluster representing a manifold
+    seq_of_views_in_cluster = []
+    parents_of_views_in_cluster = []
+    cluster_of_view = np.zeros(n_views, dtype=int)
+
+    for i in range(n_comp):
+        views_in_this_comp = np.where(comp_labels == i)[0]
+        n_views_in_this_comp = len(views_in_this_comp)
+        W_ = W[views_in_this_comp, :][:, views_in_this_comp].copy()
+        if n_views_in_this_comp > 1:
+            # Compute maximum spanning tree/forest of W
+            T = minimum_spanning_tree(-W_)
+
+            # center_i = np.argmax(n_C[views_in_this_comp])
+            center_i = center_of_tree(T)
+
+            seq, rho_ = breadth_first_order(
+                T, center_i, directed=False
+            )  # (ignores edge weights)
+            seq = views_in_this_comp[seq]
+            mask = rho_ > 0
+            rho_[mask] = views_in_this_comp[rho_[mask]]
+            rho = np.zeros(n_views, dtype=int) - 9999
+            rho[views_in_this_comp] = rho_
+        else:
+            seq = views_in_this_comp
+            rho = np.zeros(n_views, dtype=int) - 9999
+
+        seq_of_views_in_cluster.append(seq)
+        parents_of_views_in_cluster.append(rho)
+        cluster_of_view[seq] = i
+
+    return seq_of_views_in_cluster, parents_of_views_in_cluster, cluster_of_view
+
+
+def center_of_tree(T):
+    """Compute the center node of a tree T"""
+
+    s1, pred1 = breadth_first_order(T, 0, directed=False)
+    s2, pred2 = breadth_first_order(T, s1[-1], directed=False)
+    nodes_on_longest_path = [s2[-1]]
+    pred = 0
+    while pred >= 0:
+        pred = pred2[nodes_on_longest_path[-1]]
+        nodes_on_longest_path.append(pred)
+    n = len(nodes_on_longest_path)
+    return nodes_on_longest_path[n // 2]
+
+
+def compute_init_embedding(
+    d,
+    Utilde,
+    param,
+    seq_of_intermed_views_in_cluster,
+    parents_of_intermed_views_in_cluster,
+    C,
+    verbose,
+):
+    """Initial alignment of datapoints in embedding via Procrustes alignment.
+
+    Parameter
+    ------
+    d : int
+        Embedding dimension
+
+    seq_of_intermed_views_in_cluster : array-like, shape (n_samples)
+
+    parents_of_intermed_views_in_cluster : array-like, shape (n_sampels)
+
+    C : sparse-matrix, shape (n_samples, n_samples)
+
+    verbose : bool
+        If True, print logs to stdout.
+
+    Returns
+    ------
+    y : array-like, shape (n_samples, d)
+        Points in new space after initial alignment
+
+    """
+
+    M, n = Utilde.shape
+
+    param.T = np.tile(np.eye(d), [M, 1, 1])
+    param.v = np.zeros((M, d))
+    y = np.zeros((n, d))
+
+    n_clusters = len(seq_of_intermed_views_in_cluster)
+
+    # Boolean array to keep track of already visited views
+    is_visited_view = np.zeros(M, dtype=bool)
+
+    for i in range(n_clusters):
+        # First view global embedding is same as intermediate embedding
+        seq = seq_of_intermed_views_in_cluster[i]
+        rho = parents_of_intermed_views_in_cluster[i]
+        seq_0 = seq[0]
+        is_visited_view[seq_0] = True
+        y[C[seq_0, :].indices, :] = param.eval_(
+            {"view_index": seq_0, "data_mask": C[seq_0, :].indices}
+        )
+        y, is_visited_view = procrustes_init(
+            seq, rho, y, is_visited_view, d, Utilde, C, param
+        )
+
+    if verbose:
+        err = compute_alignment_err(d, Utilde, param, verbose)
+        print("Alignment error: %0.3f" % (err / Utilde.nnz), flush=True)
+
+    return y
+
+
+def compute_incidence_matrix_in_embedding(y, C, k, nu, metric="euclidean"):
+    """
+
+    Parameters
+    ------
+    y : array-like, shape (n_samples, d)
+        Data in embedding
+
+    C : sparse-matrix, shape (n_clusters, n_samples)
+
+    k : int
+        Number of neighbors
+
+    nu : int
+        The ratio of the size of local views in the embedding against those
+        in the data.
+
+    metric : str, default='euclidean'
+        Distance metric in the embedding space.
+
+    Returns
+    ------
+    Utildeg : sparse-matrix, shape (n_clusters, n_clusters)
+
+    """
+
+    M, n = C.shape
+    k_ = min(int(k * nu), n - 1)
+    _, neigh_indg = nearest_neighbors(y, k_, metric)
+    Ug = sparse_matrix(neigh_indg, np.ones(neigh_indg.shape, dtype=bool))
+    Utildeg = C.dot(Ug)
+    return Utildeg
+
+
+def compute_final_embedding(
+    y,
+    d,
+    Utilde,
+    C,
+    param,
+    to_tear,
+    patience,
+    max_iter,
+    max_internal_iter,
+    tol,
+    nu,
+    k,
+    metric,
+    alpha,
+    verbose,
+):
+    """Align clusters via Riemannian Gradient Descent.
+
+        Parameters
+        ------
+        y : array-like, shape (n_samples, d)
+            Initial embedding of data.
+
+        d : int
+            Embedding dimension
+
+        Utilde : sparse-matrix, shape (n_clusters, n_samples)
+            Bipartite graph
+
+        C : sparse-matrix, shape (n_clusters, n_samples)
+
+
+        param : Param object
+            Holds parameterisations for each point.
+
+        to_tear : bool
+            Whether to tear the manifold.
+
+        patience : int
+            Patience epochs
+
+        max_iter : int
+            Number of iterations to refine the global embedding for.
+            In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
+            For every iter in max_iter, the alignment of points in the embedding is recomputed.
+
+        max_internal_iter : int
+            The number of internal iterations used by Riemannian Gradient Descent.
+
+        tol : float
+            The tolerance level for the relative change in the alignment error and the
+            relative change in the size of the tear.
+
+        nu : int
+            The ratio of the size of local views in the embedding against those
+            in the data.
+
+        k : int
+            Neighborhood size for local view fitting.
+
+        metric : str, default='euclidean'
+            Metric assumed on the embedding. Currently only euclidean is supported.
+
+        alpha : float
+            The step size used during Riemannian gradient descent.
+
+        verbose : bool
+            If True, print logs to stdout.
+
+        Returns
+        ------
+        y : array-like, shape (n_samples, d)
+            Aligned points in the embedded space
+    s
+    """
+
+    np.random.seed(42)  # for reproducbility
+
+    patience_ctr = patience
+    prev_err = None
+    prev_edges = None
+    Utilde_t = Utilde.copy()
+
+    # Refine global embedding y
+    for it0 in range(max_iter):
+
+        if to_tear:
+            Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
+            Utilde_t = Utildeg.multiply(Utilde)
+            Utilde_t.eliminate_zeros()
+
+        y = rgd_alignment(d, Utilde_t, param, max_internal_iter, alpha, verbose)
+        if (
+            patience_ctr < max_iter or verbose
+        ):  # If it makes sense to compute the error or verbose
+            err = compute_alignment_err(d, Utilde_t, param, verbose)
+            E_Gamma_t = Utilde_t.nnz
+            err = err / E_Gamma_t
+            if verbose:
+                print("Alignment error: %0.6f" % (err), flush=True)
+            if prev_err is not None:
+                if (np.abs(err - prev_err) / (prev_err + 1e-12) < tol) and (
+                    np.abs(E_Gamma_t - prev_edges) / (prev_edges + 1e-12) < tol
+                ):
+                    patience_ctr -= 1
+                else:
+                    patience_ctr = patience
+            prev_err = err
+            prev_edges = E_Gamma_t
+
+            if patience_ctr <= 0:
+                return y
+
+    return y
+
+
+def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
+    """Riemannian Gradient Descent (RGD)
+
+    Parameters
+    ------
+    d : int
+        Embedding dimension
+
+    Utilde : sparse-matrix, shape (n_clusters, n_samples)
+        Bipartite graph
+
+    param : Param object
+        Stores parameterisations for all points
+
+    max_internal_iter : int
+        RGD alignment iterations
+
+    alpha : float
+        Step size
+
+    verbose : bool
+        If True, print logs to stdout.
+
+    Returns
+    ------
+    Geometric mean of points after alignment.
+
+    """
+
+    def unique_qr(A):
+        Q, R = np.linalg.qr(A)
+        signs = 2 * np.diagonal(R >= 0, axis1=1, axis2=2) - 1
+        Q *= signs[:, None, :]
+        return Q
+
+    def update(alpha, max_iter, O, CC, M, d):
+        O_ = np.reshape(np.asarray(O), (d, d, M), order="F").transpose(2, 0, 1)
+        CC_ = np.reshape(np.asarray(CC), (d, M, d, M), order="F")
+
+        for _ in range(max_iter):
+            # xi_ = np.einsum('imj,jikb->bkm', O_, CC_)
+            xi_ = np.tensordot(O_, CC_, axes=([0, 2], [1, 0])).transpose(2, 1, 0)
+            h = O_ @ xi_
+            h_skew = h.transpose(0, -1, -2) - h
+            O_ = unique_qr(O_ - alpha * h_skew @ O_)
+
+        return O_.transpose(1, 2, 0).reshape(O.shape, order="F")
+
+    CC, Lpinv_BT, _, _ = build_ortho_optim(d, Utilde, param, verbose)
+    M, n = Utilde.shape
+
+    if verbose:
+        print("Descent starts", flush=True)
+
+    Tstar = update(
+        alpha, max_internal_iter, np.tile(np.eye(d), (1, M)), CC, M, d
+    )  # At each iteration compute a new S starting with S = I
+
+    Zstar = Tstar.dot(Lpinv_BT.transpose())  # update y_k's
+
+    Tstar_ = Tstar.reshape((len(Tstar), d, -1), order="F").transpose(2, 1, 0)
+    param.T = np.matmul(param.T, Tstar_)  # update transformations of individual points
+    param.v = np.matmul(param.v[:, np.newaxis, :], Tstar_).squeeze() + Zstar[:, n:].T
+
+    return Zstar[:, :n].T
+
+
+def compute_Lpinv_helpers(W):
+    B_ = W.copy().transpose().astype("float")
+    D_1 = np.asarray(B_.sum(axis=1))
+    D_2 = np.asarray(B_.sum(axis=0))
+    D_1_inv_sqrt = np.sqrt(1 / D_1)
+    D_2_inv_sqrt = np.sqrt(1 / D_2)
+    B_tilde = B_.multiply(D_2_inv_sqrt).multiply(D_1_inv_sqrt)
+
+    U12, SS, VT = svd(B_tilde.todense(), full_matrices=False)
+    U12, VT = svd_flip(U12, VT)
+
+    V = VT.T
+    mask = np.abs(SS - 1) < 1e-6
+    m_1 = np.sum(mask)
+    Sigma = np.expand_dims(SS[m_1:], 1)
+    Sigma_1 = 1 / (1 - Sigma**2)
+    Sigma_2 = Sigma * Sigma_1
+    U1 = U12[:, :m_1]
+    U2 = U12[:, m_1:]
+    V1 = V[:, :m_1]
+    V2 = V[:, m_1:]
+    return [D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2]
+
+
+# Ngoc-Diep Ho, Paul Van Dooren, On the pseudo-inverse of the Laplacian of a bipartite graph
+def compute_Lpinv_MT(Lpinv_helpers, B):
+    D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2 = Lpinv_helpers
+    n = D_1_inv_sqrt.shape[0]
+    B_mean = B.mean(axis=1)
+    if len(B_mean.shape) == 1:
+        B_mean = B_mean[:, None]
+    B_n = B - B_mean
+    B_n = np.asarray(B_n)
+    B1T = D_1_inv_sqrt * (B_n[:, :n].T)
+    B2T = D_2_inv_sqrt.T * (B_n[:, n:].T)
+
+    U1TB1T = np.matmul(U1.T, B1T)
+    U2TB1T = np.matmul(U2.T, B1T)
+    V1TB2T = np.matmul(V1.T, B2T)
+    V2TB2T = np.matmul(V2.T, B2T)
+
+    temp1 = (
+        -0.75 * np.matmul(U1, U1TB1T)
+        - 0.25 * np.matmul(U1, V1TB2T)
+        + np.matmul(U2, ((Sigma_1 - 1)) * (U2TB1T))
+        + np.matmul(U2, Sigma_2 * (V2TB2T))
+        + B1T
+    )
+    temp1 = temp1 * D_1_inv_sqrt
+
+    temp2 = (
+        -0.25 * np.matmul(V1, U1TB1T)
+        + 0.25 * np.matmul(V1, V1TB2T)
+        + np.matmul(V2, Sigma_2 * (U2TB1T))
+        + np.matmul(V2, Sigma_1 * (V2TB2T))
+    )
+    temp2 = temp2 * D_2_inv_sqrt.T
+
+    temp = np.concatenate((temp1, temp2), axis=0)
+    temp = temp - np.mean(temp, axis=0, keepdims=True)
+    return temp
+
+
+def compute_CC(D, B, Lpinv_BT):
+    CC = D - B.dot(Lpinv_BT)
+    return 0.5 * (CC + CC.T)
+
+
+def build_ortho_optim(d, Utilde, param, verbose):
+    """Compute the Graph-Laplacian's inverse times B^\top."""
+    M, n = Utilde.shape
+    B_row_inds = []
+    B_col_inds = []
+    B_vals = []
+    D = []
+
+    W = Utilde.astype(float)
+    W_vals = W.data
+
+    for i in range(M):
+        Utilde_i = Utilde[i, :].indices
+        X_ = param.eval_({"view_index": i, "data_mask": Utilde_i})
+        sqrt_p_ki = np.sqrt(np.array(W[i, :].data).flatten()[:, None])
+        X_ = sqrt_p_ki * X_
+        D.append(np.matmul(X_.T, X_))
+
+        row_inds = list(range(d * i, d * (i + 1)))
+        col_inds = Utilde_i.tolist()
+
+        B_row_inds += row_inds + np.repeat(row_inds, len(col_inds)).tolist()
+        B_col_inds += np.repeat([n + i], d).tolist() + np.tile(col_inds, d).tolist()
+
+        X_ = sqrt_p_ki * X_
+        B_vals += np.sum(-X_.T, axis=1).tolist() + X_.T.flatten().tolist()
+
+    D = block_diag(D, format="csr")
+    B = csr_matrix((B_vals, (B_row_inds, B_col_inds)), shape=(M * d, n + M))
+
+    if verbose:
+        print("min and max weights:", np.array(W_vals).min(), np.array(W_vals).max())
+
+        print(
+            f"Computing Pseudoinverse of a matrix of L of size {n} + {M} multiplied with B",
+            flush=True,
+        )
+    Lpinv_helpers = compute_Lpinv_helpers(W)
+
+    Lpinv_BT = compute_Lpinv_MT(Lpinv_helpers, B)
+    CC = compute_CC(D, B, Lpinv_BT)
+
+    CC_net = CC
+
+    return CC_net, Lpinv_BT, D, B
+
+
+# unscaled alignment error
+def compute_alignment_err(d, Utilde, intermed_param, verbose):
+    """Compute alignment error of data in new space.
+
+    Parameters
+    ------
+    d : int
+        Embedding dimension
+
+    Utilde : sparse-matrix, shape (n_clusters, n_samples)
+        Bipartite graph
+
+    param : Param object
+        Stores parameterisations for all points
+    """
+
+    CC, _, _, _ = build_ortho_optim(d, Utilde, intermed_param, verbose)
+    M, n = Utilde.shape
+
+    CC_mask = np.tile(np.eye(d, dtype=bool), (M, M))
+    return np.sum(CC[CC_mask])
+
+
+def custom_procrustes(X, Y, compute_cost=False):
+    n, m = X.shape
+    ny, my = Y.shape
+
+    muX = X.mean(0)
+    muY = Y.mean(0)
+
+    X0 = X - muX
+    Y0 = Y - muY
+
+    A = np.dot(X0.T, Y0)
+    U, S, Vt = np.linalg.svd(A, full_matrices=False)
+    V = Vt.T
+    T = np.dot(V, U.T)
+    v = muX - np.dot(muY, T)
+
+    if compute_cost:
+        c = np.sum(X0**2) + np.sum(Y0**2) - 2 * np.sum(S)
+        return T, v, c
+    else:
+        return T, v
+
+
+# Solves for T, v s.t. T, v = argmin_{R,w)||AR + w - B||_F^2
+# Here A and B have same shape n x d, T is d x d and v is 1 x d
+def procrustes(A, B):
+    T, v = custom_procrustes(B, A)
+    return T, v
+
+
+def procrustes_init(seq, rho, y, is_visited_view, d, Utilde, C, param):
+    n = Utilde.shape[1]
+    # Traverse views from 2nd view
+    for m in range(1, seq.shape[0]):
+        s = seq[m]
+        # pth view is the parent of sth view
+        p = rho[s]
+        Utilde_s = Utilde[s, :]
+
+        Z_s = [p]
+        # Compute centroid mu_s
+        # n_Utilde_s_Z_s[k] = #views in Z_s which contain
+        # kth point if kth point is in the sth view, else zero
+        n_Utilde_s_Z_s = np.zeros(n, dtype=int)
+        mu_s = np.zeros((n, d))
+        for mp in Z_s:
+            Utilde_s_mp = Utilde_s.multiply(Utilde[mp, :]).nonzero()[1]
+            n_Utilde_s_Z_s[Utilde_s_mp] += 1
+            mu_s[Utilde_s_mp, :] += param.eval_(
+                {"view_index": mp, "data_mask": Utilde_s_mp}
+            )
+
+        # Compute T_s and v_s by aligning the embedding of the overlap
+        # between sth view and the views in Z_s, with the centroid mu_s
+        temp = n_Utilde_s_Z_s > 0
+        mu_s = mu_s[temp, :] / n_Utilde_s_Z_s[temp, np.newaxis]
+        V_s_Z_s = param.eval_({"view_index": s, "data_mask": temp})
+
+        T_s, v_s = procrustes(V_s_Z_s, mu_s)
+
+        # Update T_s, v_
+        param.T[s, :, :] = np.matmul(param.T[s, :, :], T_s)
+        param.v[s, :] = np.matmul(param.v[s, :][np.newaxis, :], T_s) + v_s
+
+        # Mark sth view as visited
+        is_visited_view[s] = True
+
+        # Compute global embedding of point in sth cluster
+        C_s = C[s, :].indices
+        y[C_s, :] = param.eval_({"view_index": s, "data_mask": C_s})
+    return y, is_visited_view
+
+
+def procrustes_final(
+    y, d, Utilde, C, intermed_param, seq_of_intermed_views_in_cluster, global_opts
+):
+    M, n = Utilde.shape
+    # Traverse over intermediate views in a random order
+    seq = np.random.permutation(M)
+    is_first_view_in_cluster = np.zeros(M, dtype=bool)
+    # is_first_view_in_cluster[i] = True if the ith view is the first
+    # view in some cluster of views
+    for i in range(len(seq_of_intermed_views_in_cluster)):
+        is_first_view_in_cluster[seq_of_intermed_views_in_cluster[i][0]] = True
+
+    y_due_to_all_views = []
+    for k in range(n):
+        y_due_to_all_views.append({})
+
+    for s in range(M):
+        Utilde_s = Utilde[s, :].nonzero()[1]
+        y_Utilde_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s})
+        for k in range(len(Utilde_s)):
+            y_due_to_all_views[Utilde_s[k]][s] = y_Utilde_s[k, :]
+
+    # For a given seq, refine the global embedding
+    for _ in range(global_opts["max_internal_iter"]):
+        for s in seq.tolist():
+            # # Never refine s_0th intermediate view
+            # if is_first_view_in_cluster[s]:
+            #     continue
+
+            Utilde_s = Utilde[s, :].nonzero()[1]
+            mu_s = []
+            Utilde_s_ = []
+            for k_ in range(len(Utilde_s)):
+                k = Utilde_s[k_]
+                if len(y_due_to_all_views[k]) == 1:
+                    continue
+                Utilde_s_.append(k)
+                mu = np.array(list(y_due_to_all_views[k].values())).sum(axis=0)
+                mu = (mu - y_due_to_all_views[k][s]) / (len(y_due_to_all_views[k]) - 1)
+                mu_s.append(mu)
+            mu_s = np.array(mu_s)
+            Utilde_s_ = np.array(Utilde_s_)
+
+            # Compute T_s and v_s by aligning the embedding of the overlap
+            # between sth view and the views in Z_s, with the centroid mu_s
+            V_s_Z_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s_})
+            T_s, v_s = procrustes(V_s_Z_s, mu_s)
+
+            # Update T_s, v_s
+            intermed_param.T[s, :, :] = np.matmul(intermed_param.T[s, :, :], T_s)
+            intermed_param.v[s, :] = (
+                np.matmul(intermed_param.v[s, :][np.newaxis, :], T_s) + v_s
+            )
+
+            y_Utilde_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s})
+            for k in range(len(Utilde_s)):
+                y_due_to_all_views[Utilde_s[k]][s] = y_Utilde_s[k, :]
+
+    y = np.zeros((n, d))
+    for k in range(n):
+        y[k, :] = np.array(list(y_due_to_all_views[k].values())).mean(axis=0)
+    return y
+
+
+class Param:
+    """Model to transform each point to its embedding.
+
+    Parameters
+    ------
+    algo: {'lpca', 'kpca'}, default='lpca'
+        'lpca': Use linear PCA for local fitting.
+        'kpca': Use kernel PCA.
+    """
+
+    def __init__(self, algo="lpca", **kwargs):
+        self.algo = algo
+        self.T = None
+        self.v = None
+        self.b = None
+
+        # Following variables are
+        # initialized externally
+        # i.e. by the caller
+        self.zeta = None
+        self.noise_seed = None
+        self.noise_var = 0
+        self.noise = None
+
+        # For LPCA and its variants
+        self.Psi = None
+        self.mu = None
+        self.X = None
+        self.y = None
+
+        # For KPCA etc
+        self.model = None
+        self.X = None
+        self.y = None
+
+        self.add_dim = False
+        self.standardize = False
+
+    def batched_eval_(self, opts):
+        """Maps multiple points to the new space through their local (K-)PCA prameterizations.
+
+        Parameters
+        ------
+        opts : dict
+            Must have keys
+                view_index : array-like, shape (n_points)
+                    The indices of the parameterization to use.
+
+                data_mask : array-like, shape (n_points, n_neighbors)
+                    List of points to map to the embedding dimension for each point in 'view_index'
+        """
+
+        ks = opts["view_index"]
+        masks = opts["data_mask"]
+
+        if self.algo == "lpca":
+            temp = np.matmul(
+                self.X[masks] - self.mu[ks][:, np.newaxis, :], self.Psi[ks]
+            )
+            n = self.X.shape[0]
+        else:
+            temp = []
+            for i, k in enumerate(ks):
+                X_ = self.X[masks[i], :]
+                if self.standardize:
+                    X_ = X_ - np.mean(X_, axis=0)[None, :]
+                    X_ = X_ / (np.std(X_, axis=0, ddof=1)[None, :] + 1e-12)
+                temp.append(self.model[k].transform(X_))
+            temp = np.array(temp)
+
+        if self.noise_var:
+            np.random.seed(self.noise_seed[0])
+            temp2 = np.random.normal(0, self.noise_var, (n, temp.shape[2]))
+            temp = temp + temp2[masks, :]
+        if self.noise is not None:
+            temp = temp + self.noise[masks]
+
+        if self.add_dim:
+            temp = np.concatenate([temp, np.zeros((*temp.shape[:2], 1))], axis=2)
+
+        if self.b is not None:
+            temp = temp * self.b[ks][:, None, None]
+            if self.T is not None:
+                temp = np.dot(temp, self.T[ks, :, :])
+            if self.v is not None:
+                temp = temp + self.v[[ks], :]
+        return temp
+
+    def eval_(self, opts, apply_b=True):
+        """Maps points to the new space through their local (K-)PCA prameterizations.
+
+        Parameters
+        ------
+        opts : dict
+            Must have keys
+                'view_index : int
+                    The index of the parameterization to use.
+
+                data_mask : array-like, shape (n_neighbors)
+                    List of points to map to the embedding dimension.
+        """
+
+        k = opts["view_index"]
+        mask = opts["data_mask"]
+
+        if self.algo == "lpca":
+            temp = np.dot(
+                self.X[mask, :] - self.mu[k, :][np.newaxis, :], self.Psi[k, :, :]
+            )
+            n = self.X.shape[0]
+        else:
+            X_ = self.X[mask, :]
+            if self.standardize:
+                X_ = X_ - np.mean(X_, axis=0)[None, :]
+                X_ = X_ / (np.std(X_, axis=0, ddof=1)[None, :] + 1e-12)
+            temp = self.model[k].transform(X_)
+
+        if self.noise_var:
+            np.random.seed(self.noise_seed[k])
+            temp2 = np.random.normal(0, self.noise_var, (n, temp.shape[1]))
+            temp = temp + temp2[mask, :]
+
+        if self.noise is not None:
+            temp = temp + self.noise[k, mask, :]
+
+        if self.add_dim:
+            temp = np.concatenate([temp, np.zeros((temp.shape[0], 1))], axis=1)
+
+        if self.b is None or not apply_b:
+            return temp
+        else:
+            temp = self.b[k] * temp
+            if self.T is not None:
+                temp = np.dot(temp, self.T[k, :, :])
+            if self.v is not None:
+                temp = temp + self.v[[k], :]
+            return temp
+
+    def replace_(self, new_param_ind):
+        """Re-orders the parameterizations.
+
+        Parameters
+        ------
+        new_param_ind : array-like, shape (n_samples)
+            Indices of new ordering of parameterizations.
+
+        """
+        if self.algo in ["lpca"]:
+            self.Psi = self.Psi[new_param_ind, :]
+            self.mu = self.mu[new_param_ind, :]
+        else:  # ISOMAP, LKPCA
+            self.model = self.model[new_param_ind]
+
+    def reconstruct_(self, opts):
+        k = opts["view_index"]
+        y_ = opts["embeddings"]
+        if self.algo == "LPCA":
+            temp = (
+                np.dot(
+                    np.dot(y_ - self.v[[k], :], self.T[k, :, :].T), self.Psi[k, :, :].T
+                )
+                + self.mu[k, :][np.newaxis, :]
+            )
+        else:
+            temp = self.model[k].inverse_transform(y_)
+        return temp

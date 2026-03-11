@@ -1,8 +1,66 @@
-Implementation of [Riemannian Alignment of Tangent Spaces (RATS)](https://www.biorxiv.org/content/10.1101/2024.10.31.621292v2.abstract)
+# About
 
-Code coming soon!
+pyRATS is a lightweight Python tool implementing [Riemannian Alignment of Tangent Spaces (RATS)](https://www.biorxiv.org/content/10.1101/2024.10.31.621292v2.abstract) for non-linear dimensionality reduction. 
+With the ubiquity of high-dimensional datasets in various natural sciences, identifying low-dimensional topological manifolds within such datasets may reveal principles connecting latent variables to measurable instances in the world. 
+While leading dimensionality reduction methods introduce distortion during this process, RATS excels at the visualization and deciphering of latent variables. RATS recovers low-distortion embeddings of data, including the ability to embed closed manifolds into their intrinsic dimension using a tearing process.
 
-### Citation
+# Installation
+```
+pip install git+https://github.com/Mishne-Lab/pyRATS
+```
+
+# RATS
+RATS applies three main algorithmic steps:
+1) It maps locally linear patches of points via (Kernel-)PCA to the embedding space. Postprocessing may be applied on noisy data to remove patches that incur abnormally high distortion. 
+2) It clusters points that apply similar transformations to project to the embedding space.
+3) It aligns the clusters into a single cluster via rigid alignment.
+
+This bottum-up approach of tearing the manifold apart into smaller clusters allows for leaving the manifold torn.
+
+### Manifold tearing
+Closed manifolds can be projected to low dimensional spaces without incurring high distortion only by ripping/ tearing the manifold apart. 
+RATS can provide 'gluing' instructions that indicate which two points on the manifold should be glued back together. 
+Not only are we able to generate accurate low-dimensional embeddings, this feature allows for manifold denoising by projecting it to lower dimensional spaces and projecting back.
+
+# Example
+```py
+import pyRATS
+import datasets, vis
+
+# sample 5000 datapoints from a kleinbottle manifold in living in 4d space
+X, labels, _ = datasets.Datasets().kleinbottle4d(n=5000)
+
+# create a RATS object projecting the data to 2d while tearing the manifold
+model = pyRATS.RATS(d=2, k=28, eta_min=5, to_tear=True)
+y = model.fit_transform(X)
+
+# compute the gluing instructions along the tear
+color_of_pts_on_tear = model.compute_color_of_pts_on_tear(y)
+
+# plot the resulting 2d representation of the manifold
+vis.global_embedding(
+  y, labels[:,0],
+  color_of_pts_on_tear=color_of_pts_on_tear[:,[0, 1, 2]],
+  cmap0='summer', cmap1='jet',
+  figsize=(3, 3)
+)
+```
+![Example](examples/kleinbottle_example.png)
+
+# Docs
+The documentation can be generated with the following commands:
+```bash
+pip install sphinx sphinxcontrib-napoleon
+cd docs
+make html
+cd build/html
+python -m http.server 8000
+```
+and opening http://localhost:8000 in your browser.
+
+
+Citation
+----------
 ```
 @article{rats,
   title={RATS: Unsupervised manifold learning using low-distortion alignment of tangent spaces},

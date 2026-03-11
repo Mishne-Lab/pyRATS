@@ -1,0 +1,5 @@
+src/pyRATS/__pycache__/
+src/pyRATS.egg-info
+.vscode
+.DS_Store
+__pycache__
