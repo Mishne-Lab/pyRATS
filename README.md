@@ -37,13 +37,14 @@ model = rats.RATS(d=2, k=28, eta_min=5, to_tear=True)
 y = model.fit_transform(X)
 
 # compute the gluing instructions along the tear
-color_of_pts_on_tear = model.compute_color_of_pts_on_tear(y)
+tear_color_eig_inds = [7, 2, 4]
+color_of_pts_on_tear = model.compute_color_of_pts_on_tear(y, tear_color_eig_inds)
 
 # plot the resulting 2d representation of the manifold
 vis.Visualize().global_embedding(
   y, labels[:,0],
-  color_of_pts_on_tear=color_of_pts_on_tear[:,[0, 1, 2]],
-  cmap0='summer', cmap1='jet',
+  color_of_pts_on_tear=color_of_pts_on_tear[:,tear_color_eig_inds],
+  cmap0='coolwarm',
   figsize=(3, 3)
 )
 ```
