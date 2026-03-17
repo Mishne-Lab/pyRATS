@@ -206,6 +206,7 @@ class RATS:
             self.metric,
             self.verbose,
             self.n_jobs,
+            self.Utildeg,
         )
 
     def inverse_transform(self, y):
@@ -402,7 +403,7 @@ class RATS:
         )
 
         # apply RGD
-        y_final = compute_final_embedding(
+        y_final, Utildeg = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -419,6 +420,7 @@ class RATS:
             self.alpha,
             self.verbose,
         )
+        self.Utildeg = Utildeg
 
         return y_final
 

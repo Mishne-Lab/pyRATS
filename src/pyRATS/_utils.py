@@ -76,9 +76,7 @@ def lpca(X, d, U, n_jobs, verbose=False):
         var_explained = np.zeros((n_inds, p))
         n_pc_dir_chosen = np.zeros(n_inds)
 
-        for k in range(
-            start_ind, end_ind
-        ):  # TODO: we can very easily get rid of this loop
+        for k in range(start_ind, end_ind):
             i = k - start_ind
 
             U_k = U[k, :].indices
@@ -401,7 +399,7 @@ def cost_of_moving_distortion(
     neigh_ind_k : array-like, shape (n_neighbors)
         List of neighbor indices of point k.
 
-    U_k : array-like, shape (n_neighbors)   # FIXME: superfluous, test global distortion with Utilde[k] and c_k
+    U_k : array-like, shape (n_neighbors)
         List of neighbor indices of point k.
 
     param : Param object
@@ -505,7 +503,6 @@ def compute_zeta(d_e_mask0, Psi_k_mask):
     return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
 
 
-# TODO: whats the difference between neigh_ind_k and U_k?
 def cost_of_moving_alignment_error(
     k, d_e, neigh_ind_k, U_k, param, c, n_C, Utilde, eta_min, eta_max
 ):
@@ -523,7 +520,7 @@ def cost_of_moving_alignment_error(
     neigh_ind_k : array-like, shape (n_neighbors)
         List of neighbor indices of point k.
 
-    U_k : array-like, shape (n_neighbors)   # FIXME: superfluous, test global distortion with Utilde[k] and c_k
+    U_k : array-like, shape (n_neighbors)
         List of neighbor indices of point k.
 
     param : Param object
@@ -1193,7 +1190,10 @@ def compute_final_embedding(
             if patience_ctr <= 0:
                 return y
 
-    return y
+    if to_tear:
+        Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
+
+    return y, Utildeg
 
 
 def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
