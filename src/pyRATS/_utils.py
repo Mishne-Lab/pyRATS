@@ -470,13 +470,18 @@ def cost_of_moving_distortion(
 
 
 def compute_zeta(d_e_mask0, Psi_k_mask):
-    d_e_mask = d_e_mask0.toarray()
-    if d_e_mask.shape[0] == 1:
+    if d_e_mask0.shape[0] == 1:
         return 1
-    d_e_mask_ = squareform(d_e_mask)
-    mask = d_e_mask_ != 0
-    d_e_mask_ = d_e_mask_[mask]
-    disc_lip_const = pdist(Psi_k_mask)[mask] / d_e_mask_
+    d_e_upper = triu(d_e_mask0, k=1)
+    row, col = d_e_upper.nonzero()
+    if len(row) == 0:
+        return 1
+    
+    d_e_vals = d_e_upper.data
+    diff = Psi_k_mask[row] - Psi_k_mask[col]
+    dist_embedded = np.sqrt(np.sum(diff * diff, axis=1))
+    
+    disc_lip_const = dist_embedded / d_e_vals
     return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
 
 
@@ -647,6 +652,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
     cost = np.zeros(n) + np.inf
     dest = np.zeros(n, dtype="int") - 1
+    U_csc = U.tocsc()
 
     # Vary eta from 2 to eta_{min}
     if verbose:
@@ -714,7 +720,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
                 S_ = (
                     (c == dest_k)
                     | (dest == dest_k)
-                    | np.array(U[:, list(Clstr[s])].sum(1), dtype=bool).flatten()
+                    | np.array(U_csc[:, list(Clstr[s])].sum(1), dtype=bool).flatten()
                 )
             else:
                 S_ = (c == dest_k) | (dest == dest_k) | (dest == s)
