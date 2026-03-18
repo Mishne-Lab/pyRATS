@@ -24,4 +24,9 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pandas",
+    "Pillow",
+    "matplotlib",
+    "imageio",
+    "seaborn",
 ]
