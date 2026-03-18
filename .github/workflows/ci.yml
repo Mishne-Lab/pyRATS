@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    # Step 1: Checkout the known-good commit to generate expected baselines
+    - name: Checkout Known-Good Commit
+      uses: actions/checkout@v3
+      with:
+        ref: 8e27b77
+    - name: Install Dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -e .[test]
+    - name: Generate Expected Baselines
+      run: python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/expected --fast-mode
+
+    # Step 2: Checkout the current code testing branch
+    - name: Checkout Current Code
+      uses: actions/checkout@v3
+      with:
+        clean: false # Keep the dynamically generated tests/data/expected folder intact
+    - name: Install Current Dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -e .[test]
+    - name: Generate Actual Results
+      run: python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/actual --fast-mode
+
+    # Step 3: Pytest E2E Snapshot Assertions
+    - name: Run Pytest Comparison
+      run: pytest tests/test_e2e.py

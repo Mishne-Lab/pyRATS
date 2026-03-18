@@ -20,3 +20,8 @@ dependencies = [
     "joblib",
     "multiprocess",
 ]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
