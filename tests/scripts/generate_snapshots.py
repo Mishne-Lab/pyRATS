@@ -121,7 +121,7 @@ if __name__ == "__main__":
             "swissrollwithhole",
             "squarewithtwoholes",
         ]
-        ks = [14, 21, 28]
+        ks = [14, 21]
         eta_mins = [5, 10]
         cost_fn_names = ["distortion", "alignment"]
 
