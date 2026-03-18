@@ -19,7 +19,8 @@ jobs:
     - name: Checkout Known-Good Commit
       uses: actions/checkout@v4
       with:
-        ref: 8e27b77
+        ref: 8e27b77b3247e1ac7447e7ea429e0f0c103a3fb0
+        fetch-depth: 0
     - name: Install Dependencies for Baseline
       run: |
         pip install --upgrade pip
