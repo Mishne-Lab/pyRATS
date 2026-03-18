@@ -554,10 +554,8 @@ def cost_of_moving_alignment_error(
     # c_U_k_uniq_k = np.union1d(c_U_k_uniq[neighbor_mask], c_k)
     c_U_k_uniq_k = np.union1d(c_U_k_uniq[neighbor_mask], k)
     evals = param.batched_eval_(
-        {
-            "view_index": c_U_k_uniq_k,
-            "data_mask": np.broadcast_to(U_k_list, [len(c_U_k_uniq_k), len(U_k_list)]),
-        }
+        c_U_k_uniq_k,
+        np.broadcast_to(U_k_list, [len(c_U_k_uniq_k), len(U_k_list)]),
     )
 
     m = c_U_k_uniq_k == k
@@ -1278,33 +1276,52 @@ def compute_Lpinv_helpers(W):
 def compute_Lpinv_MT(Lpinv_helpers, B):
     D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2 = Lpinv_helpers
     n = D_1_inv_sqrt.shape[0]
-    B_mean = B.mean(axis=1)
+    Md = B.shape[0]
+    M = B.shape[1] - n
+
+    B_mean = np.array(B.mean(axis=1))
     if len(B_mean.shape) == 1:
         B_mean = B_mean[:, None]
-    B_n = B - B_mean
-    B_n = np.asarray(B_n)
-    B1T = D_1_inv_sqrt * (B_n[:, :n].T)
-    B2T = D_2_inv_sqrt.T * (B_n[:, n:].T)
 
-    U1TB1T = np.matmul(U1.T, B1T)
-    U2TB1T = np.matmul(U2.T, B1T)
-    V1TB2T = np.matmul(V1.T, B2T)
-    V2TB2T = np.matmul(V2.T, B2T)
+    B1 = B[:, :n]
+    B2 = B[:, n:]
+
+    # Optimized matrix-vector products using identities to avoid full dense B_n
+    # Identity: U^T (diag(D) (B - mu 1^T))^T = (U^T diag(D)) B^T - (U^T diag(D) 1) mu^T
+    
+    # Compute U^T * B1T terms
+    U1T_D1 = (U1 * D_1_inv_sqrt).T  # (m1, n)
+    U1TB1T = (U1T_D1 @ B1.T) - (U1T_D1.sum(axis=1)[:, None] @ B_mean.T)
+
+    U2T_D1 = (U2 * D_1_inv_sqrt).T  # (M-m1, n)
+    U2TB1T = (U2T_D1 @ B1.T) - (U2T_D1.sum(axis=1)[:, None] @ B_mean.T)
+
+    # Compute V^T * B2T terms
+    # D_2_inv_sqrt is (1, M)
+    V1T_D2 = (V1 * D_2_inv_sqrt.T).T  # (m1, M)
+    V1TB2T = (V1T_D2 @ B2.T) - (V1T_D2.sum(axis=1)[:, None] @ B_mean.T)
+
+    V2T_D2 = (V2 * D_2_inv_sqrt.T).T  # (M-m1, M)
+    V2TB2T = (V2T_D2 @ B2.T) - (V2T_D2.sum(axis=1)[:, None] @ B_mean.T)
+
+    # B1T and B2T are needed for the final sum, but we only materialize them once
+    # B1T = D_1_inv_sqrt * (B - B_mean)[:, :n].T
+    B1T = (B1.T.multiply(D_1_inv_sqrt)).toarray() - (D_1_inv_sqrt @ B_mean.T)
 
     temp1 = (
-        -0.75 * np.matmul(U1, U1TB1T)
-        - 0.25 * np.matmul(U1, V1TB2T)
-        + np.matmul(U2, ((Sigma_1 - 1)) * (U2TB1T))
-        + np.matmul(U2, Sigma_2 * (V2TB2T))
+        -0.75 * (U1 @ U1TB1T)
+        - 0.25 * (U1 @ V1TB2T)
+        + (U2 @ ((Sigma_1 - 1) * U2TB1T))
+        + (U2 @ (Sigma_2 * V2TB2T))
         + B1T
     )
     temp1 = temp1 * D_1_inv_sqrt
 
     temp2 = (
-        -0.25 * np.matmul(V1, U1TB1T)
-        + 0.25 * np.matmul(V1, V1TB2T)
-        + np.matmul(V2, Sigma_2 * (U2TB1T))
-        + np.matmul(V2, Sigma_1 * (V2TB2T))
+        -0.25 * (V1 @ U1TB1T)
+        + 0.25 * (V1 @ V1TB2T)
+        + (V2 @ (Sigma_2 * U2TB1T))
+        + (V2 @ (Sigma_1 * V2TB2T))
     )
     temp2 = temp2 * D_2_inv_sqrt.T
 
@@ -1321,48 +1338,79 @@ def compute_CC(D, B, Lpinv_BT):
 def build_ortho_optim(d, Utilde, param, verbose):
     """Compute the Graph-Laplacian's inverse times B^\top."""
     M, n = Utilde.shape
-    B_row_inds = []
-    B_col_inds = []
-    B_vals = []
-    D = []
-
     W = Utilde.astype(float)
-    W_vals = W.data
-
+    W_vals_all = W.data
+    
+    # Vectorized construction of D and B components
+    D_list = []
+    
+    # We still loop over M to build B values, but we use pre-allocated arrays
+    # or better, compute B values in blocks.
+    B_data_vals = []
+    B_cluster_vals = []
+    B_cols = []
+    
     for i in range(M):
         Utilde_i = Utilde[i, :].indices
         X_ = param.eval_(i, Utilde_i)
-        sqrt_p_ki = np.sqrt(np.array(W[i, :].data).flatten()[:, None])
-        X_ = sqrt_p_ki * X_
-        D.append(np.matmul(X_.T, X_))
+        weights_i = W_vals_all[W.indptr[i]:W.indptr[i+1]]
+        sqrt_p_ki = np.sqrt(weights_i[:, None])
+        
+        # Weighted embeddings for D: sqrt(W) * X
+        X_weighted = sqrt_p_ki * X_
+        D_list.append(X_weighted.T @ X_weighted)
 
-        row_inds = list(range(d * i, d * (i + 1)))
-        col_inds = Utilde_i.tolist()
+        # Weighted embeddings for B: W * X
+        X_B = weights_i[:, None] * X_
+        B_data_vals.append(X_B.T.flatten())
+        B_cluster_vals.append(np.sum(-X_B.T, axis=1))
+        B_cols.append(Utilde_i)
 
-        B_row_inds += row_inds + np.repeat(row_inds, len(col_inds)).tolist()
-        B_col_inds += np.repeat([n + i], d).tolist() + np.tile(col_inds, d).tolist()
+    D = block_diag(D_list, format="csr")
+    
+    # Efficiently construct B
+    B_data_vals = np.concatenate(B_data_vals)
+    B_cluster_vals = np.concatenate(B_cluster_vals)
+    
+    B_cols_data = []
+    for i in range(M):
+        B_cols_data.append(np.tile(B_cols[i], d))
+    B_cols_data = np.concatenate(B_cols_data)
+    
+    # Row indices for data values
+    counts = np.diff(W.indptr)
+    B_rows_data = np.repeat(np.arange(M) * d, counts * d) + np.tile(np.arange(d), len(B_cols_data) // d)
+    # Wait, the above tiling is not quite right if counts vary.
+    # Correct rows: repeat each row index (i*d + offset)
+    B_rows_data = []
+    for i in range(M):
+        r = np.arange(i * d, (i + 1) * d)
+        B_rows_data.append(np.repeat(r, counts[i]))
+    B_rows_data = np.concatenate(B_rows_data)
 
-        X_ = sqrt_p_ki * X_
-        B_vals += np.sum(-X_.T, axis=1).tolist() + X_.T.flatten().tolist()
-
-    D = block_diag(D, format="csr")
-    B = csr_matrix((B_vals, (B_row_inds, B_col_inds)), shape=(M * d, n + M))
+    # B indices for cluster nodes
+    B_rows_cluster = np.arange(M * d)
+    B_cols_cluster = np.repeat(np.arange(n, n + M), d)
+    
+    # Combine everything
+    B_row_all = np.concatenate([B_rows_cluster, B_rows_data])
+    B_col_all = np.concatenate([B_cols_cluster, B_cols_data])
+    B_val_all = np.concatenate([B_cluster_vals, B_data_vals])
+    
+    B = csr_matrix((B_val_all, (B_row_all, B_col_all)), shape=(M * d, n + M))
 
     if verbose:
-        print("min and max weights:", np.array(W_vals).min(), np.array(W_vals).max())
-
+        print("min and max weights:", np.array(W_vals_all).min(), np.array(W_vals_all).max())
         print(
             f"Computing Pseudoinverse of a matrix of L of size {n} + {M} multiplied with B",
             flush=True,
         )
-    Lpinv_helpers = compute_Lpinv_helpers(W)
 
+    Lpinv_helpers = compute_Lpinv_helpers(W)
     Lpinv_BT = compute_Lpinv_MT(Lpinv_helpers, B)
     CC = compute_CC(D, B, Lpinv_BT)
 
-    CC_net = CC
-
-    return CC_net, Lpinv_BT, D, B
+    return CC, Lpinv_BT, D, B
 
 
 # unscaled alignment error
