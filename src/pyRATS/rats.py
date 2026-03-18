@@ -514,10 +514,7 @@ class RATS:
         ).reshape(n, num_pairs)
 
         embedded_datapoints = self.param.batched_eval_(
-            {
-                "view_index": range(n),
-                "data_mask": self.U.indices.reshape(n, self.k),
-            }
+            range(n), self.U.indices.reshape(n, self.k)
         )  # tested and they are equivalent
         embedded_dists = batched_pdist(embedded_datapoints)
         disc_lip_const = np.divide(
@@ -534,7 +531,7 @@ class RATS:
 
         if self.verbose:
             print(
-                r"Maximum local distoriton before postptocessing is: %0.4f"
+                r"Maximum local distortion before postprocessing is: %0.4f"
                 % np.max(zeta)
             )
 
@@ -564,10 +561,7 @@ class RATS:
                 ]  # list of indices
 
                 batch_embedded_datapoints = self.param.batched_eval_(
-                    {
-                        "view_index": future_use_phi_of[use_phi_of],
-                        "data_mask": neighbors_to_reconsider,
-                    }
+                    future_use_phi_of[use_phi_of], neighbors_to_reconsider
                 )
                 batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
                 batch_original_dists = original_dists[points_to_reconsider]
@@ -609,6 +603,6 @@ class RATS:
         self.param.replace_(future_use_phi_of)
         if self.verbose:
             print(
-                f"Maximum local distoriton after post-processing is: %0.4f"
+                f"Maximum local distortion after postprocessing is: %0.4f"
                 % (np.max(self.param.zeta))
             )

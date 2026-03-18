@@ -8,7 +8,7 @@ where = ["src"]
 [project]
 name = "pyRATS"
 version = "0.0.1"
-description = ""
+description = "Riemannian Alignment of Tangent Spaces (RATS) for dimensionality reduction"
 readme = "README.md"
 license-files = ["License"]
 requires-python = ">=3.9"
