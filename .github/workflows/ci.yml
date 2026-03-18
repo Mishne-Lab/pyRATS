@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ 'main' ]
+  workflow_dispatch:
+    inputs:
+      fast_mode:
+        description: 'Run in fast mode'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Checkout Current Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install Dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -e .[test]
+
+    - name: Set Fast Mode Flag
+      id: set-flag
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          echo "fast_flag=" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${{ github.event.inputs.fast_mode }}" == "true" ]]; then
+            echo "fast_flag=--fast-mode" >> $GITHUB_OUTPUT
+          else
+            echo "fast_flag=" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "fast_flag=--fast-mode" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 2: Generate Expected Baselines (using baseline source code but current scripts)
+    - name: Generate Expected Baselines
+      run: |
+        git checkout 8e27b77b3247e1ac7447e7ea429e0f0c103a3fb0 -- src/
+        python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/expected ${{ steps.set-flag.outputs.fast_flag }}
+        git checkout HEAD -- src/
+
+    # Step 3: Generate Actual Results
+    - name: Generate Actual Results
+      run: python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/actual ${{ steps.set-flag.outputs.fast_flag }}
+
+    # Step 4: Pytest E2E Snapshot Assertions
+    - name: Run Pytest Comparison
+      run: pytest tests/test_e2e.py
