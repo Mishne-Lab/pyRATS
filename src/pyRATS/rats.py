@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.sparse import csr_matrix
-from scipy.spatial.distance import squareform
 
 from multiprocessing import cpu_count
 
@@ -429,12 +428,17 @@ class RATS:
 
         n = self.U.shape[0]
 
-        original_dists = np.empty((n, int((self.k * (self.k - 1) // 2))))
-        for i in range(n):
-            U_i = self.U[i, :].indices
-            d_e_i = self.neighborhood_graph_sym[np.ix_(U_i, U_i)]
-            d_e_mask_ = squareform(d_e_i.toarray())
-            original_dists[i] = d_e_mask_  # These can be stored and reused
+        # Vectorised: gather all pairwise neighbour distances at once.
+        # neigh_inds[i] are the k neighbour indices of point i (same as
+        # connectivity_matrix used below, extracted once here for clarity).
+        neigh_inds = self.U.indices.reshape(n, self.k)  # (n, k)
+        pair_i, pair_j = np.triu_indices(self.k, k=1)   # all upper-triangle pairs
+        row_idx = neigh_inds[:, pair_i].ravel()           # (n * num_pairs,)
+        col_idx = neigh_inds[:, pair_j].ravel()           # (n * num_pairs,)
+        num_pairs = len(pair_i)
+        original_dists = np.asarray(
+            self.neighborhood_graph_sym[row_idx, col_idx]
+        ).reshape(n, num_pairs)
 
         embedded_datapoints = self.param.batched_eval_(
             {
