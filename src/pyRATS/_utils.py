@@ -452,7 +452,7 @@ def cost_of_moving_distortion(
             # that is cost_{x_k \rightarrow m}
             cost_x_k_to[i] = compute_zeta(
                 d_e[np.ix_(U_k_U_Utilde_m, U_k_U_Utilde_m)],
-                local_param.eval_({"view_index": m, "data_mask": U_k_U_Utilde_m}),
+                local_param.eval_(m, U_k_U_Utilde_m),
             )
 
         i += 1
@@ -812,8 +812,8 @@ def compute_seq_of_views(
             m = W_rows[i]
             mpp = W_cols[i]
             mask = i_mat[m, :].multiply(i_mat[mpp, :]).nonzero()[1]
-            V_mmp = param.eval_({"view_index": m, "data_mask": mask})
-            V_mpm = param.eval_({"view_index": mpp, "data_mask": mask})
+            V_mmp = param.eval_(m, mask)
+            V_mpm = param.eval_(mpp, mask)
             Vbar_mmp = V_mmp - np.mean(V_mmp, 0)[np.newaxis, :]
             Vbar_mpm = V_mpm - np.mean(V_mpm, 0)[np.newaxis, :]
             # Compute ambiguity of the overlaps captured by singular values
@@ -971,7 +971,7 @@ def compute_init_embedding(
         seq_0 = seq[0]
         is_visited_view[seq_0] = True
         y[C[seq_0, :].indices, :] = param.eval_(
-            {"view_index": seq_0, "data_mask": C[seq_0, :].indices}
+            seq_0, C[seq_0, :].indices
         )
         y, is_visited_view = procrustes_init(
             seq, rho, y, is_visited_view, d, Utilde, C, param
@@ -1286,7 +1286,7 @@ def build_ortho_optim(d, Utilde, param, verbose):
 
     for i in range(M):
         Utilde_i = Utilde[i, :].indices
-        X_ = param.eval_({"view_index": i, "data_mask": Utilde_i})
+        X_ = param.eval_(i, Utilde_i)
         sqrt_p_ki = np.sqrt(np.array(W[i, :].data).flatten()[:, None])
         X_ = sqrt_p_ki * X_
         D.append(np.matmul(X_.T, X_))
@@ -1392,14 +1392,14 @@ def procrustes_init(seq, rho, y, is_visited_view, d, Utilde, C, param):
             Utilde_s_mp = Utilde_s.multiply(Utilde[mp, :]).nonzero()[1]
             n_Utilde_s_Z_s[Utilde_s_mp] += 1
             mu_s[Utilde_s_mp, :] += param.eval_(
-                {"view_index": mp, "data_mask": Utilde_s_mp}
+                mp, Utilde_s_mp
             )
 
         # Compute T_s and v_s by aligning the embedding of the overlap
         # between sth view and the views in Z_s, with the centroid mu_s
         temp = n_Utilde_s_Z_s > 0
         mu_s = mu_s[temp, :] / n_Utilde_s_Z_s[temp, np.newaxis]
-        V_s_Z_s = param.eval_({"view_index": s, "data_mask": temp})
+        V_s_Z_s = param.eval_(s, temp)
 
         T_s, v_s = procrustes(V_s_Z_s, mu_s)
 
@@ -1412,72 +1412,11 @@ def procrustes_init(seq, rho, y, is_visited_view, d, Utilde, C, param):
 
         # Compute global embedding of point in sth cluster
         C_s = C[s, :].indices
-        y[C_s, :] = param.eval_({"view_index": s, "data_mask": C_s})
+        y[C_s, :] = param.eval_(s, C_s)
     return y, is_visited_view
 
 
-def procrustes_final(
-    y, d, Utilde, C, intermed_param, seq_of_intermed_views_in_cluster, global_opts
-):
-    M, n = Utilde.shape
-    # Traverse over intermediate views in a random order
-    seq = np.random.permutation(M)
-    is_first_view_in_cluster = np.zeros(M, dtype=bool)
-    # is_first_view_in_cluster[i] = True if the ith view is the first
-    # view in some cluster of views
-    for i in range(len(seq_of_intermed_views_in_cluster)):
-        is_first_view_in_cluster[seq_of_intermed_views_in_cluster[i][0]] = True
 
-    y_due_to_all_views = []
-    for k in range(n):
-        y_due_to_all_views.append({})
-
-    for s in range(M):
-        Utilde_s = Utilde[s, :].nonzero()[1]
-        y_Utilde_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s})
-        for k in range(len(Utilde_s)):
-            y_due_to_all_views[Utilde_s[k]][s] = y_Utilde_s[k, :]
-
-    # For a given seq, refine the global embedding
-    for _ in range(global_opts["max_internal_iter"]):
-        for s in seq.tolist():
-            # # Never refine s_0th intermediate view
-            # if is_first_view_in_cluster[s]:
-            #     continue
-
-            Utilde_s = Utilde[s, :].nonzero()[1]
-            mu_s = []
-            Utilde_s_ = []
-            for k_ in range(len(Utilde_s)):
-                k = Utilde_s[k_]
-                if len(y_due_to_all_views[k]) == 1:
-                    continue
-                Utilde_s_.append(k)
-                mu = np.array(list(y_due_to_all_views[k].values())).sum(axis=0)
-                mu = (mu - y_due_to_all_views[k][s]) / (len(y_due_to_all_views[k]) - 1)
-                mu_s.append(mu)
-            mu_s = np.array(mu_s)
-            Utilde_s_ = np.array(Utilde_s_)
-
-            # Compute T_s and v_s by aligning the embedding of the overlap
-            # between sth view and the views in Z_s, with the centroid mu_s
-            V_s_Z_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s_})
-            T_s, v_s = procrustes(V_s_Z_s, mu_s)
-
-            # Update T_s, v_s
-            intermed_param.T[s, :, :] = np.matmul(intermed_param.T[s, :, :], T_s)
-            intermed_param.v[s, :] = (
-                np.matmul(intermed_param.v[s, :][np.newaxis, :], T_s) + v_s
-            )
-
-            y_Utilde_s = intermed_param.eval_({"view_index": s, "data_mask": Utilde_s})
-            for k in range(len(Utilde_s)):
-                y_due_to_all_views[Utilde_s[k]][s] = y_Utilde_s[k, :]
-
-    y = np.zeros((n, d))
-    for k in range(n):
-        y[k, :] = np.array(list(y_due_to_all_views[k].values())).mean(axis=0)
-    return y
 
 
 class Param:
@@ -1512,28 +1451,24 @@ class Param:
 
         # For KPCA etc
         self.model = None
-        self.X = None
-        self.y = None
 
         self.add_dim = False
         self.standardize = False
 
-    def batched_eval_(self, opts):
+    def batched_eval_(self, view_index, data_mask):
         """Maps multiple points to the new space through their local (K-)PCA prameterizations.
 
         Parameters
         ------
-        opts : dict
-            Must have keys
-                view_index : array-like, shape (n_points)
-                    The indices of the parameterization to use.
+        view_index : array-like, shape (n_points)
+            The indices of the parameterization to use.
 
-                data_mask : array-like, shape (n_points, n_neighbors)
-                    List of points to map to the embedding dimension for each point in 'view_index'
+        data_mask : array-like, shape (n_points, n_neighbors)
+            List of points to map to the embedding dimension for each point in 'view_index'
         """
 
-        ks = opts["view_index"]
-        masks = opts["data_mask"]
+        ks = view_index
+        masks = data_mask
 
         if self.algo == "lpca":
             temp = np.matmul(
@@ -1568,22 +1503,23 @@ class Param:
                 temp = temp + self.v[[ks], :]
         return temp
 
-    def eval_(self, opts, apply_b=True):
+    def eval_(self, view_index, data_mask, apply_b=True):
         """Maps points to the new space through their local (K-)PCA prameterizations.
 
         Parameters
         ------
-        opts : dict
-            Must have keys
-                'view_index : int
-                    The index of the parameterization to use.
+        view_index : int
+            The index of the parameterization to use.
 
-                data_mask : array-like, shape (n_neighbors)
-                    List of points to map to the embedding dimension.
+        data_mask : array-like, shape (n_neighbors)
+            List of points to map to the embedding dimension.
+
+        apply_b : bool, default=True
+            Whether to apply the scale transformation b[k].
         """
 
-        k = opts["view_index"]
-        mask = opts["data_mask"]
+        k = view_index
+        mask = data_mask
 
         if self.algo == "lpca":
             temp = np.dot(
@@ -1633,9 +1569,9 @@ class Param:
         else:  # ISOMAP, LKPCA
             self.model = self.model[new_param_ind]
 
-    def reconstruct_(self, opts):
-        k = opts["view_index"]
-        y_ = opts["embeddings"]
+    def reconstruct_(self, view_index, embeddings):
+        k = view_index
+        y_ = embeddings
         if self.algo == "LPCA":
             temp = (
                 np.dot(
