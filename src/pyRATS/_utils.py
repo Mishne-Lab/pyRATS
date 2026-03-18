@@ -243,16 +243,10 @@ def batched_pdist(x):
         x = np.array(x)
 
     n, k, _ = x.shape
-    res = np.empty((n, k * (k - 1) // 2))
-    p = 0
-    for i in range(k):
-        a = x[:, i]
-        bs = x[:, i + 1 :]
-
-        cs = bs - a[:, None, :]
-        res[:, p : p + k - i - 1] = np.sum(cs * cs, axis=-1)
-        p += k - i - 1
-    return np.sqrt(res)
+    # Precompute all upper-triangle pair indices (same order as the original loop)
+    pair_i, pair_j = np.triu_indices(k, k=1)          # each shape (num_pairs,)
+    diff = x[:, pair_i, :] - x[:, pair_j, :]          # (n, num_pairs, d)
+    return np.sqrt(np.sum(diff * diff, axis=-1))        # (n, num_pairs)
 
 
 def batched_procrustes_cost(X, Y):
