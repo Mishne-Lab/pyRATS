@@ -17,21 +17,29 @@ jobs:
 
     # Step 1: Checkout the known-good commit to generate expected baselines
     - name: Checkout Known-Good Commit
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         ref: 8e27b77
-    - name: Install Dependencies
+    - name: Install Dependencies for Baseline
       run: |
         pip install --upgrade pip
         pip install -e .[test]
     - name: Generate Expected Baselines
-      run: python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/expected --fast-mode
+      run: |
+        python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/expected --fast-mode
+    - name: Store Baselines Temporarily
+      run: |
+        mv tests/data/expected ${{ runner.temp }}/expected_baselines
 
-    # Step 2: Checkout the current code testing branch
+    # Step 2: Checkout the current code testing branch (CLEAN)
     - name: Checkout Current Code
-      uses: actions/checkout@v3
-      with:
-        clean: false # Keep the dynamically generated tests/data/expected folder intact
+      uses: actions/checkout@v4
+    
+    - name: Restore Expected Baselines
+      run: |
+        mkdir -p tests/data
+        mv ${{ runner.temp }}/expected_baselines tests/data/expected
+
     - name: Install Current Dependencies
       run: |
         pip install --upgrade pip
