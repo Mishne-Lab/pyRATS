@@ -1,0 +1,35 @@
+name: Performance Benchmark
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ 'main' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    name: RATS Performance Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .[test]
+
+      - name: Run Benchmark
+        run: |
+          echo "## RATS Performance Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo "Dataset: Klein Bottle (4D)" >> $GITHUB_STEP_SUMMARY
+          echo "Parameters: k=14, eta_min=5" >> $GITHUB_STEP_SUMMARY
+          python tests/scripts/benchmark.py >> $GITHUB_STEP_SUMMARY
