@@ -1,9 +1,9 @@
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-from scipy.linalg import svd, svdvals
+from scipy.linalg import svd, svdvals, eigh
 from scipy.sparse.linalg import svds
 from sklearn.decomposition import KernelPCA
-from scipy.sparse import csr_matrix, triu, block_diag
+from scipy.sparse import csr_matrix, triu, block_diag, diags
 import itertools
 
 from joblib import delayed, Parallel
