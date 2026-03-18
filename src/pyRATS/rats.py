@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from scipy.sparse import csr_matrix
 
 from multiprocessing import cpu_count
@@ -32,8 +33,11 @@ class RATS:
         If True, searches for local embeddings that minimize the local distortion.
         Useful for noisy manifolds.
 
-    kpca_kernel : {'linear', 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default='linear'
-        Kernel used for PCA. See https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.KernelPCA.html for more information.
+    kpca_kernel : {None, 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default=None
+        Kernel used for PCA. None uses standard linear PCA (lpca). Any other value
+        uses sklearn.decomposition.KernelPCA. See
+        https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.KernelPCA.html
+        for more information.
 
     cost_fn_name : {'alignment', 'distortion'}, default='alignment'
         'alignment': Alignment error should be prefered when runtime matters or dealing with noisy manifolds.
@@ -108,18 +112,40 @@ class RATS:
         eps=1e-8,
         patience=5,
         tol=1e-2,
-        n_connected_manifolds=1,
+        n_forced_clusters=1,
         verbose=False,
         n_jobs=-1,
     ):
 
-        assert cost_fn_name in ["alignment", "distortion"]
+        if cost_fn_name not in ["alignment", "distortion"]:
+            raise ValueError(
+                f"cost_fn_name must be 'alignment' or 'distortion', got {cost_fn_name!r}."
+            )
+        if eta_max <= eta_min:
+            raise ValueError(
+                f"eta_max ({eta_max}) must be greater than eta_min ({eta_min})."
+            )
+        if metric != "euclidean":
+            warnings.warn(
+                f"metric={metric!r} is not yet fully supported. Only 'euclidean' is "
+                "used in the embedding step. This parameter will be extended in a "
+                "future release.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if kpca_fit_inverse_transform:
+            warnings.warn(
+                "kpca_fit_inverse_transform=True is not yet supported and will be "
+                "ignored. Inverse transform support will be added in a future release.",
+                FutureWarning,
+                stacklevel=2,
+            )
 
         self.verbose = verbose
         self.n_jobs = n_jobs
 
         self.d = d
-        self.kpca_kernel = None if kpca_kernel == "linear" else kpca_kernel
+        self.kpca_kernel = kpca_kernel
         self.kpca_fit_inverse_transform = kpca_fit_inverse_transform
         self.k = k
         if cost_fn_name == "distortion":
@@ -134,9 +160,8 @@ class RATS:
         self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = patience, tol
-        self.verbose = verbose
         self.metric = metric
-        self.n_forced_clusters = n_connected_manifolds
+        self.n_forced_clusters = n_forced_clusters
 
         if self.patience is None:
             self.patience = self.max_iter
@@ -208,8 +233,56 @@ class RATS:
             self.Utildeg,
         )
 
+    def fit(self, X):
+        """Fit the model on X without returning the embedding.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Sample data.
+
+        Returns
+        -------
+        self
+        """
+        raise NotImplementedError(
+            "fit() is not yet implemented. Use fit_transform() instead."
+        )
+
+    def transform(self, X):
+        """Apply the fitted embedding to new data X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            New data to embed.
+
+        Returns
+        -------
+        y : array-like, shape (n_samples, d)
+            X transformed in the new space.
+        """
+        raise NotImplementedError(
+            "transform() is not yet implemented. Use fit_transform() instead."
+        )
+
     def inverse_transform(self, y):
-        NotImplementedError()
+        """Map points from the embedding space back to the original space.
+
+        Parameters
+        ----------
+        y : array-like, shape (n_samples, d)
+            Points in the embedding space.
+
+        Returns
+        -------
+        X : array-like, shape (n_samples, n_features)
+            Points in the original space.
+        """
+        raise NotImplementedError(
+            "inverse_transform() is not yet implemented."
+        )
+
 
     def _fit_nbrhd_graph(self, X, sort_results=True):
         """Fitting the neighborhood graph.
