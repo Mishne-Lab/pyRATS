@@ -3,18 +3,12 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.linalg import svd, svdvals
 from scipy.sparse.linalg import svds
 from sklearn.decomposition import KernelPCA
-from scipy.sparse import csr_matrix, triu
+from scipy.sparse import csr_matrix, triu, block_diag
 import itertools
 
 from joblib import delayed, Parallel
-import multiprocess as mp
-from multiprocess import shared_memory
-
-from scipy.sparse.linalg import svds
-from scipy.linalg import svd
 
 from scipy.spatial.distance import pdist, squareform
-from scipy.sparse import csr_matrix, block_diag
 from sklearn.utils.extmath import svd_flip
 from scipy.sparse.csgraph import (
     minimum_spanning_tree,
@@ -105,7 +99,6 @@ def lpca(X, d, U, n_jobs, verbose=False):
     results = Parallel(n_jobs=n_jobs)(
         delayed(target_proc)(i, chunk_sz) for i in range(n_jobs)
     )
-    results = [target_proc(0, n)]
 
     for i in range(len(results)):
         start_ind, end_ind, Psi_, mu_, var_explained_, n_pc_dir_chosen_ = results[i]
@@ -165,7 +158,7 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
     local_param.model = np.empty(n, dtype=object)
     local_param.zeta = np.zeros(n)
 
-    def target_proc(p_num, chunk_sz, q_):
+    def target_proc(p_num, chunk_sz):
         start_ind = p_num * chunk_sz
         if p_num == (n_jobs - 1):
             end_ind = n
@@ -184,25 +177,15 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
             U_k = U[k]
             X_k = X[U_k, :]
             model_[k - start_ind].fit(X_k)
-        q_.put((start_ind, end_ind, model_))
+        return start_ind, end_ind, model_
 
-    q_ = mp.Queue()
     chunk_sz = int(n / n_jobs)
-    proc = []
-    for p_num in range(n_jobs):
-        proc.append(
-            mp.Process(target=target_proc, args=(p_num, chunk_sz, q_), daemon=True)
-        )
-        proc[-1].start()
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(target_proc)(p_num, chunk_sz) for p_num in range(n_jobs)
+    )
 
-    for p_num in range(n_jobs):
-        start_ind, end_ind, model_ = q_.get()
+    for start_ind, end_ind, model_ in results:
         local_param.model[start_ind:end_ind] = model_
-
-    q_.close()
-
-    for p_num in range(n_jobs):
-        proc[p_num].join()
 
     if verbose:
         print("local_param: all %d points processed..." % n)
@@ -673,20 +656,6 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
     cost = np.zeros(n) + np.inf
     dest = np.zeros(n, dtype="int") - 1
 
-    shm_cost = shared_memory.SharedMemory(create=True, size=cost.nbytes)
-    np_cost = np.ndarray(cost.shape, dtype=cost.dtype, buffer=shm_cost.buf)
-    np_cost[:] = cost[:]
-    shm_dest = shared_memory.SharedMemory(create=True, size=dest.nbytes)
-    np_dest = np.ndarray(dest.shape, dtype=dest.dtype, buffer=shm_dest.buf)
-    np_dest[:] = dest[:]
-
-    shm_cost_name = shm_cost.name
-    cost_shape = cost.shape
-    cost_dtype = cost.dtype
-    shm_dest_name = shm_dest.name
-    dest_shape = dest.shape
-    dest_dtype = dest.dtype
-
     # Vary eta from 2 to eta_{min}
     if verbose:
         print("Constructing intermediate views.")
@@ -699,50 +668,34 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             )
             print("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
 
-        def target_proc(p_num, chunk_sz, n_, Utilde, n_C, c, S):
-            existing_shm_cost = shared_memory.SharedMemory(name=shm_cost_name)
-            cost_ = np.ndarray(
-                cost_shape, dtype=cost_dtype, buffer=existing_shm_cost.buf
-            )
-            existing_shm_dest = shared_memory.SharedMemory(name=shm_dest_name)
-            dest_ = np.ndarray(
-                dest_shape, dtype=dest_dtype, buffer=existing_shm_dest.buf
-            )
-
+        def target_proc(p_num, chunk_sz, n_, Utilde, n_C, c):
             start_ind = p_num * chunk_sz
             if p_num == (n_jobs - 1):
                 end_ind = n_
             else:
                 end_ind = (p_num + 1) * chunk_sz
 
-            for k in range(start_ind, end_ind):
-                if S is None:
-                    k1 = k
-                else:
-                    k1 = S[k]
-                cost_[k1], dest_[k1] = cost_of_moving(
-                    k1, d_e, neigh_ind[k1], U_[k1], param, c, n_C, Utilde, eta, eta_max
+            cost_ = np.zeros(end_ind - start_ind) + np.inf
+            dest_ = np.zeros(end_ind - start_ind, dtype="int") - 1
+            for i, k in enumerate(range(start_ind, end_ind)):
+                cost_[i], dest_[i] = cost_of_moving(
+                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
                 )
+            return start_ind, end_ind, cost_, dest_
 
-        proc = []
         chunk_sz = int(n / n_jobs)
-        for p_num in range(n_jobs):
-            proc.append(
-                mp.Process(
-                    target=target_proc,
-                    args=(p_num, chunk_sz, n, Utilde, n_C, c, None),
-                    daemon=True,
-                )
-            )
-            proc[-1].start()
-
-        for p_num in range(n_jobs):
-            proc[p_num].join()
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
+            for p_num in range(n_jobs)
+        )
+        for start_ind, end_ind, cost_, dest_ in results:
+            cost[start_ind:end_ind] = cost_
+            dest[start_ind:end_ind] = dest_
 
         # Compute point with minimum cost
         # Compute k and cost^*
-        k = np.argmin(np_cost)
-        cost_star = np_cost[k]
+        k = np.argmin(cost)
+        cost_star = cost[k]
 
         if verbose:
             print("Costs computed when eta = %d." % eta)
@@ -751,11 +704,10 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         total_len_S = 0
         ctr = 0
         while cost_star < np.inf:
-            # print(k, cost_star, flush=True)
             # Move x_k from cluster s to
             # dest_k and update variables
             s = c[k]
-            dest_k = np_dest[k]
+            dest_k = dest[k]
             c[k] = dest_k
             n_C[s] -= 1
             n_C[dest_k] += 1
@@ -769,23 +721,23 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             if n_C[s] > 0:
                 S_ = (
                     (c == dest_k)
-                    | (np_dest == dest_k)
+                    | (dest == dest_k)
                     | np.array(U[:, list(Clstr[s])].sum(1), dtype=bool).flatten()
                 )
             else:
-                S_ = (c == dest_k) | (np_dest == dest_k) | (np_dest == s)
+                S_ = (c == dest_k) | (dest == dest_k) | (dest == s)
             S = np.where(S_)[0].tolist()
             len_S = len(S)
             total_len_S += len_S
             ctr += 1
 
             for k in S:
-                np_cost[k], np_dest[k] = cost_of_moving(
+                cost[k], dest[k] = cost_of_moving(
                     k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
                 )
 
-            k = np.argmin(np_cost)
-            cost_star = np_cost[k]
+            k = np.argmin(cost)
+            cost_star = cost[k]
 
         if verbose:
             print(
@@ -798,10 +750,6 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             )
             print("Done with eta = %d." % eta)
 
-    shm_cost.close()
-    shm_cost.unlink()
-    shm_dest.close()
-    shm_dest.unlink()
     return c, n_C
 
 
