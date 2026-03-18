@@ -1206,14 +1206,59 @@ def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
 
 
 def compute_Lpinv_helpers(W):
-    B_ = W.copy().transpose().astype("float")
+    M, n = W.shape
+    B_ = W.transpose().tocsr().astype("float")
     D_1 = np.asarray(B_.sum(axis=1))
     D_2 = np.asarray(B_.sum(axis=0))
-    D_1_inv_sqrt = np.sqrt(1 / D_1)
-    D_2_inv_sqrt = np.sqrt(1 / D_2)
-    B_tilde = B_.multiply(D_2_inv_sqrt).multiply(D_1_inv_sqrt)
+    D_1_inv_sqrt = np.sqrt(1 / D_1).flatten()
+    D_2_inv_sqrt = np.sqrt(1 / D_2).flatten()
+    
+    #B_tilde = B_.multiply(D_2_inv_sqrt).multiply(D_1_inv_sqrt)
+    # Create sparse diagonal matrices
+    D1_diag = diags(D_1_inv_sqrt)
+    D2_diag = diags(D_2_inv_sqrt)
+    
+    # Sparse matrix multiplication is MUCH faster than .multiply()
+    B_tilde = D1_diag @ B_ @ D2_diag
 
-    U12, SS, VT = svd(B_tilde.todense(), full_matrices=False)
+    # U12, SS, VT = svd(B_tilde.todense(), full_matrices=False)
+    # --- OPTIMIZED SVD: Gram Matrix Approach ---
+    if n >= M:
+        # B_tilde is (n, M). C becomes a tiny (M, M) dense matrix.
+        # Sparse matrix multiplication here is incredibly fast.
+        C = (B_tilde.T @ B_tilde).todense()
+        S2, V = eigh(C)
+        
+        # eigh returns ascending order; reverse to match standard SVD output
+        idx = np.argsort(S2)[::-1]
+        S2 = S2[idx]
+        V = V[:, idx]
+        
+        # Recover singular values and right singular vectors
+        SS = np.sqrt(np.maximum(S2, 0))
+        VT = V.T
+        
+        # Recover left singular vectors: U = B_tilde @ V @ diag(1/SS)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            SS_inv = np.where(SS > 1e-10, 1.0 / SS, 0.0)
+            
+        U12 = (B_tilde @ V) * SS_inv[np.newaxis, :]
+    else:
+        # Fallback if M > n: Compute (n, n) Gram matrix instead
+        C = (B_tilde @ B_tilde.T).todense()
+        S2, U12 = eigh(C)
+        
+        idx = np.argsort(S2)[::-1]
+        S2 = S2[idx]
+        U12 = U12[:, idx]
+        
+        SS = np.sqrt(np.maximum(S2, 0))
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            SS_inv = np.where(SS > 1e-10, 1.0 / SS, 0.0)
+            
+        VT = (U12.T @ B_tilde) * SS_inv[:, np.newaxis]
+    # -------------------------------------------
     U12, VT = svd_flip(U12, VT)
 
     V = VT.T
@@ -1226,7 +1271,7 @@ def compute_Lpinv_helpers(W):
     U2 = U12[:, m_1:]
     V1 = V[:, :m_1]
     V2 = V[:, m_1:]
-    return [D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2]
+    return [D_1_inv_sqrt[:,None], D_2_inv_sqrt[None,:], U1, U2, V1, V2, Sigma_1, Sigma_2]
 
 
 # Ngoc-Diep Ho, Paul Van Dooren, On the pseudo-inverse of the Laplacian of a bipartite graph
