@@ -1188,7 +1188,7 @@ def compute_final_embedding(
             prev_edges = E_Gamma_t
 
             if patience_ctr <= 0:
-                return y
+                break
 
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
