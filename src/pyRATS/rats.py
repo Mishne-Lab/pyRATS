@@ -3,6 +3,7 @@ import warnings
 from scipy.sparse import csr_matrix
 
 from multiprocessing import cpu_count
+from joblib import Parallel, delayed
 
 from pyRATS._utils import (
     nearest_neighbors,
@@ -514,7 +515,7 @@ class RATS:
         ).reshape(n, num_pairs)
 
         embedded_datapoints = self.param.batched_eval_(
-            {"view_index": range(n), "data_mask": self.U.indices.reshape(n, self.k)}
+            range(n), self.U.indices.reshape(n, self.k)
         )  # tested and they are equivalent
         embedded_dists = batched_pdist(embedded_datapoints)
         disc_lip_const = np.divide(
@@ -615,10 +616,8 @@ class RATS:
         points_to_reconsider = np.where(reconsider_mask)[0]  # list of indices
 
         batch_embedded_datapoints = param.batched_eval_(
-            {
-                "view_index": future_use_phi_of[use_phi_of],
-                "data_mask": neighbors_to_reconsider,
-            }
+            future_use_phi_of[use_phi_of],
+            neighbors_to_reconsider,
         )
         batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
         batch_original_dists = original_dists[points_to_reconsider]
