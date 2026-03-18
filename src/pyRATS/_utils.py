@@ -1276,52 +1276,33 @@ def compute_Lpinv_helpers(W):
 def compute_Lpinv_MT(Lpinv_helpers, B):
     D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2 = Lpinv_helpers
     n = D_1_inv_sqrt.shape[0]
-    Md = B.shape[0]
-    M = B.shape[1] - n
-
-    B_mean = np.array(B.mean(axis=1))
+    B_mean = B.mean(axis=1)
     if len(B_mean.shape) == 1:
         B_mean = B_mean[:, None]
+    B_n = B - B_mean
+    B_n = np.asarray(B_n)
+    B1T = D_1_inv_sqrt * (B_n[:, :n].T)
+    B2T = D_2_inv_sqrt.T * (B_n[:, n:].T)
 
-    B1 = B[:, :n]
-    B2 = B[:, n:]
-
-    # Optimized matrix-vector products using identities to avoid full dense B_n
-    # Identity: U^T (diag(D) (B - mu 1^T))^T = (U^T diag(D)) B^T - (U^T diag(D) 1) mu^T
-    
-    # Compute U^T * B1T terms
-    U1T_D1 = (U1 * D_1_inv_sqrt).T  # (m1, n)
-    U1TB1T = (U1T_D1 @ B1.T) - (U1T_D1.sum(axis=1)[:, None] @ B_mean.T)
-
-    U2T_D1 = (U2 * D_1_inv_sqrt).T  # (M-m1, n)
-    U2TB1T = (U2T_D1 @ B1.T) - (U2T_D1.sum(axis=1)[:, None] @ B_mean.T)
-
-    # Compute V^T * B2T terms
-    # D_2_inv_sqrt is (1, M)
-    V1T_D2 = (V1 * D_2_inv_sqrt.T).T  # (m1, M)
-    V1TB2T = (V1T_D2 @ B2.T) - (V1T_D2.sum(axis=1)[:, None] @ B_mean.T)
-
-    V2T_D2 = (V2 * D_2_inv_sqrt.T).T  # (M-m1, M)
-    V2TB2T = (V2T_D2 @ B2.T) - (V2T_D2.sum(axis=1)[:, None] @ B_mean.T)
-
-    # B1T and B2T are needed for the final sum, but we only materialize them once
-    # B1T = D_1_inv_sqrt * (B - B_mean)[:, :n].T
-    B1T = (B1.T.multiply(D_1_inv_sqrt)).toarray() - (D_1_inv_sqrt @ B_mean.T)
+    U1TB1T = np.matmul(U1.T, B1T)
+    U2TB1T = np.matmul(U2.T, B1T)
+    V1TB2T = np.matmul(V1.T, B2T)
+    V2TB2T = np.matmul(V2.T, B2T)
 
     temp1 = (
-        -0.75 * (U1 @ U1TB1T)
-        - 0.25 * (U1 @ V1TB2T)
-        + (U2 @ ((Sigma_1 - 1) * U2TB1T))
-        + (U2 @ (Sigma_2 * V2TB2T))
+        -0.75 * np.matmul(U1, U1TB1T)
+        - 0.25 * np.matmul(U1, V1TB2T)
+        + np.matmul(U2, ((Sigma_1 - 1)) * (U2TB1T))
+        + np.matmul(U2, Sigma_2 * (V2TB2T))
         + B1T
     )
     temp1 = temp1 * D_1_inv_sqrt
 
     temp2 = (
-        -0.25 * (V1 @ U1TB1T)
-        + 0.25 * (V1 @ V1TB2T)
-        + (V2 @ (Sigma_2 * U2TB1T))
-        + (V2 @ (Sigma_1 * V2TB2T))
+        -0.25 * np.matmul(V1, U1TB1T)
+        + 0.25 * np.matmul(V1, V1TB2T)
+        + np.matmul(V2, Sigma_2 * (U2TB1T))
+        + np.matmul(V2, Sigma_1 * (V2TB2T))
     )
     temp2 = temp2 * D_2_inv_sqrt.T
 
