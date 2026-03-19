@@ -174,7 +174,7 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
                 random_state=42,
                 fit_inverse_transform=fit_inverse_transform,
             )
-            U_k = U[k]
+            U_k = U[k].indices
             X_k = X[U_k, :]
             model_[k - start_ind].fit(X_k)
         return start_ind, end_ind, model_
@@ -618,14 +618,14 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
     indptr = U.indptr
     Utilde = []
     U_ = []
-    neigh_ind = []
+    neigh_ind_local = []
     for i in range(n):
         col_inds = indices[indptr[i] : indptr[i + 1]]
         Utilde.append(set(col_inds))
         U_.append(set(col_inds))
-        neigh_ind.append(col_inds)
+        neigh_ind_local.append(col_inds)
 
-    neigh_ind = np.array(neigh_ind)
+
 
     cost = np.zeros(n) + np.inf
     dest = np.zeros(n, dtype="int") - 1
@@ -654,7 +654,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             dest_ = np.zeros(end_ind - start_ind, dtype="int") - 1
             for i, k in enumerate(range(start_ind, end_ind)):
                 cost_[i], dest_[i] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
+                    k, d_e, neigh_ind_local[k], U_[k], param, c, n_C, Utilde, eta, eta_max
                 )
             return start_ind, end_ind, cost_, dest_
 
@@ -689,7 +689,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             Clstr[s].remove(k)
             Clstr[dest_k].add(k)
             Utilde[dest_k] = U_[k].union(Utilde[dest_k])
-            Utilde[s] = set(itertools.chain.from_iterable(neigh_ind[list(Clstr[s])]))
+            Utilde[s] = set().union(*(neigh_ind_local[i] for i in Clstr[s]))
 
             # Compute the set of points S for which
             # cost of moving needs to be recomputed
@@ -708,7 +708,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
             for k in S:
                 cost[k], dest[k] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
+                    k, d_e, neigh_ind_local[k], U_[k], param, c, n_C, Utilde, eta, eta_max
                 )
 
             k = np.argmin(cost)
@@ -1365,9 +1365,7 @@ def build_ortho_optim(d, Utilde, param, verbose):
     
     # Row indices for data values
     counts = np.diff(W.indptr)
-    B_rows_data = np.repeat(np.arange(M) * d, counts * d) + np.tile(np.arange(d), len(B_cols_data) // d)
-    # Wait, the above tiling is not quite right if counts vary.
-    # Correct rows: repeat each row index (i*d + offset)
+    # Block-vectorized row construction
     B_rows_data = []
     for i in range(M):
         r = np.arange(i * d, (i + 1) * d)
