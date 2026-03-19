@@ -12,16 +12,32 @@ permissions:
 
 jobs:
   benchmark:
-    name: RATS Performance Benchmark (${{ matrix.os }})
+    name: RATS Benchmark (${{ matrix.os }}, ${{ matrix.ref_name }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - ref: "${{ github.sha }}"
+            ref_name: "Current HEAD"
+          - ref: "f1a3f2233e8248ca9610af9a8498122fc557657a"
+            ref_name: "f1a3f22 (Optimized MT)"
+          - ref: "e1d13b7b1d2446a2499add3ed78f3a38e41103bc"
+            ref_name: "e1d13b7 (Merge Unit Testing V1)"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
+
+      - name: Overlay Latest Benchmark Script
+        run: |
+          git checkout ${{ github.sha }} -- tests/scripts/benchmark.py
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -36,6 +52,6 @@ jobs:
       - name: Run Benchmark
         run: |
           echo "## RATS Performance Benchmarks (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${{ matrix.ref_name }} (${{ matrix.ref }})" >> $GITHUB_STEP_SUMMARY
           echo "Dataset: Klein Bottle (4D)" >> $GITHUB_STEP_SUMMARY
-          echo "Parameters: k=14, eta_min=5" >> $GITHUB_STEP_SUMMARY
           python tests/scripts/benchmark.py >> $GITHUB_STEP_SUMMARY
