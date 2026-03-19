@@ -48,7 +48,7 @@ if __name__ == "__main__":
     if args.fast:
         sample_sizes = [400, 400, 500]
     else:
-        sample_sizes = [400, 400 , 500, 1000, 2000, 5000, 10000]
+        sample_sizes = [500 , 500, 1000, 2000, 5000, 10_000, 25_000]
     
     results = []
 
