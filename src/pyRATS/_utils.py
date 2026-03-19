@@ -364,58 +364,15 @@ def cost_of_moving_distortion(
 ):
     """Computes the minimum cost and destination cluster possible
     when merging k with its neighboring clusters.
-
-    Parameters
-    ------
-    k : int
-        Index of point
-
-    d_e : sparse matrix, shape (n_samples, n_samples)
-        Distance matrix between neighbors
-
-    neigh_ind_k : array-like, shape (n_neighbors)
-        List of neighbor indices of point k.
-
-    U_k : array-like, shape (n_neighbors)
-        List of neighbor indices of point k.
-
-    param : Param object
-        Stores the parameterizations for each point.
-
-    c : array-like (n_samples)
-        Array of indices that map from datapoint to cluster.
-
-    n_C : array-like, shape (n_samples)
-        Array of indices that map from cluster to number of points per cluster
-
-    Utilde : list
-        List of neighbor indices for each sample.
-
-    eta_min : int
-        Minimum allowed size of the clusters underlying the intermediate views.
-        The values must be >= 1.
-
-    eta_max : int
-        Maximum allowed size of the clusters underlying the intermediate views.
-        The value must be > eta_min.
-
-    Returns
-    ------
-    cost_k : float
-        Minmum cost of moving from k to its neighbor's cluster
-
-    dest_k : int
-        Destination cluster index
-
+    
+    This version uses 'super-union' vectorization to batch evaluate 
+    parameterizations while maintaining E2E correctness by including 
+    the full neighbor-union of each candidate cluster.
     """
 
     c_k = c[k]
-    # Compute |C_{c_k}|
     n_C_c_k = n_C[c_k]
 
-    # Check if |C_{c_k}| < eta_{min}
-    # If not then c_k is already
-    # an intermediate cluster
     if n_C_c_k >= eta_min:
         return np.inf, -1
 
@@ -424,31 +381,56 @@ def cost_of_moving_distortion(
     c_U_k_uniq = np.unique(c_U_k)
     cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
 
-    # Iterate over all m in c_{U_k}
+    # Identify candidate clusters and their unions
+    candidates = []
+    unions = []
     for i, m in enumerate(c_U_k_uniq):
-        if m == c_k:
+        if m == c_k or n_C[m] >= eta_max or n_C[m] < n_C_c_k:
             continue
+        
+        union_m = U_k.union(Utilde[m])
+        candidates.append((i, m))
+        unions.append(union_m)
 
-        # Compute |C_{m}|
-        n_C_m = n_C[m]
-        # Check if |C_{m}| < eta_{max}. If not
-        # then mth cluster has reached the max
-        # allowed size of the cluster. Move on.
-        if n_C_m >= eta_max:
-            continue
+    if not candidates:
+        return np.inf, -1
 
-        # Check if |C_{m}| >= |C_{c_k}|. If yes, then
-        # mth cluster satisfies all required conditions
-        # and is a candidate cluster to move x_k in.
-        if n_C_m >= n_C_c_k:
-            # Compute union of Utilde_m U_k
-            U_k_U_Utilde_m = list(U_k.union(Utilde[m]))
-            # Compute the cost of moving x_k to mth cluster,
-            # that is cost_{x_k \rightarrow m}
-            cost_x_k_to[i] = compute_zeta(
-                d_e[np.ix_(U_k_U_Utilde_m, U_k_U_Utilde_m)],
-                param.eval_(m, U_k_U_Utilde_m),
-            )
+    # Super-union vectorization
+    all_points_set = set().union(*unions)
+    all_points_list = sorted(list(all_points_set))
+    all_points_map = {p: i for i, p in enumerate(all_points_list)}
+    
+    # 1. Batched Evaluation
+    candidate_indices = [c[1] for c in candidates]
+    # param.batched_eval_ takes (num_views, num_points)
+    # Give it the same points for all views for easy batching
+    evals_all = param.batched_eval_(
+        candidate_indices, 
+        np.tile(all_points_list, (len(candidate_indices), 1))
+    ) # (num_candidates, num_total_points, dim)
+
+    # 2. Optimized distance slicing (Slice sparse once, then dense)
+    d_e_all = d_e[np.ix_(all_points_list, all_points_list)].toarray()
+
+    # 3. Compute zeta for each candidate
+    for idx, (i, m) in enumerate(candidates):
+        union_indices = [all_points_map[p] for p in unions[idx]]
+        
+        # d_e_sub should be the subgraph distance matrix
+        d_e_sub = d_e_all[np.ix_(union_indices, union_indices)]
+        psi_sub = evals_all[idx, union_indices, :]
+        
+        cost_x_k_to[i] = compute_zeta(d_e_sub, psi_sub)
+
+    # find the cluster with minimum cost
+    dest_k_idx = np.argmin(cost_x_k_to)
+    cost_k = cost_x_k_to[dest_k_idx]
+    if cost_k == np.inf:
+        dest_k = -1
+    else:
+        dest_k = c_U_k_uniq[dest_k_idx]
+
+    return cost_k, dest_k
 
     # find the cluster with minimum cost
     # to move x_k in.
