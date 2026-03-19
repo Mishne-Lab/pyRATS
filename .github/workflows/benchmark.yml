@@ -17,12 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        ref: ["${{ github.sha }}", "f1a3f2233e8248ca9610af9a8498122fc557657a"]
+        ref: ["${{ github.sha }}", "994b4e42af01e3ecada86a7abfdd2c0e59729533"]
         include:
           - ref: "${{ github.sha }}"
             ref_name: "Current HEAD"
-          - ref: "f1a3f2233e8248ca9610af9a8498122fc557657a"
-            ref_name: "f1a3f22 (Dhruv Optimized MT)"
+          - ref: "994b4e42af01e3ecada86a7abfdd2c0e59729533"
+            ref_name: "994b4e4 (Dhruv Optimized MT)"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
