@@ -389,7 +389,7 @@ def cost_of_moving_distortion(
         Array of indices that map from cluster to number of points per cluster
 
     Utilde : list
-        List of neighbor indices for each sample. (UNUSEED in vectorized version)
+        List of neighbor indices for each sample.
 
     eta_min : int
         Minimum allowed size of the clusters underlying the intermediate views.
@@ -421,28 +421,34 @@ def cost_of_moving_distortion(
 
     # Compute neighboring clusters c_{U_k} of x_k
     c_U_k = c[neigh_ind_k]
-    c_U_k_uniq = np.unique(c_U_k) # array
+    c_U_k_uniq = np.unique(c_U_k)
     cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
 
-    U_k_list = sorted(list(U_k)) # Sort for consistency
-    d_e_k = d_e[np.ix_(U_k_list, U_k_list)]
+    # Iterate over all m in c_{U_k}
+    for i, m in enumerate(c_U_k_uniq):
+        if m == c_k:
+            continue
 
-    neighbor_mask = (
-        (n_C[c_U_k_uniq] < eta_max) & (n_C[c_U_k_uniq] >= n_C_c_k) & (c_U_k_uniq != c_k)
-    )
+        # Compute |C_{m}|
+        n_C_m = n_C[m]
+        # Check if |C_{m}| < eta_{max}. If not
+        # then mth cluster has reached the max
+        # allowed size of the cluster. Move on.
+        if n_C_m >= eta_max:
+            continue
 
-    if not np.any(neighbor_mask):
-        return np.inf, -1
-
-    c_U_k_uniq_masked = c_U_k_uniq[neighbor_mask]
-    
-    # Vectorized evaluation for all candidate clusters
-    evals = param.batched_eval_(
-        c_U_k_uniq_masked,
-        np.tile(U_k_list, (len(c_U_k_uniq_masked), 1))
-    )
-
-    cost_x_k_to[neighbor_mask] = compute_zeta_batched(d_e_k, evals)
+        # Check if |C_{m}| >= |C_{c_k}|. If yes, then
+        # mth cluster satisfies all required conditions
+        # and is a candidate cluster to move x_k in.
+        if n_C_m >= n_C_c_k:
+            # Compute union of Utilde_m U_k
+            U_k_U_Utilde_m = list(U_k.union(Utilde[m]))
+            # Compute the cost of moving x_k to mth cluster,
+            # that is cost_{x_k \rightarrow m}
+            cost_x_k_to[i] = compute_zeta(
+                d_e[np.ix_(U_k_U_Utilde_m, U_k_U_Utilde_m)],
+                param.eval_(m, U_k_U_Utilde_m),
+            )
 
     # find the cluster with minimum cost
     # to move x_k in.
@@ -456,32 +462,22 @@ def cost_of_moving_distortion(
     return cost_k, dest_k
 
 
-def compute_zeta_batched(d_e_mask0, Psi_k_masks):
-    """Batched version of compute_zeta
-    
-    Parameters
-    ------
-    d_e_mask0 : sparse matrix (n_neighbors, n_neighbors)
-    
-    Psi_k_masks : array-like (batch_size, n_neighbors, dimension)
-    """
+def compute_zeta(d_e_mask0, Psi_k_mask):
+    """Computes Lipschitz ratio for a single view."""
     if d_e_mask0.shape[0] <= 1:
-        return np.ones(Psi_k_masks.shape[0])
-        
+        return 1
     d_e_upper = triu(d_e_mask0, k=1)
     row, col = d_e_upper.nonzero()
     if len(row) == 0:
-        return np.ones(Psi_k_masks.shape[0])
+        return 1
     
     d_e_vals = d_e_upper.data      # (num_pairs,)
-    # Psi_k_masks is (B, N, D)
-    # diff is (B, num_pairs, D)
-    diff = Psi_k_masks[:, row, :] - Psi_k_masks[:, col, :]
-    dist_embedded = np.sqrt(np.sum(diff * diff, axis=2)) # (B, num_pairs)
+    diff = Psi_k_mask[row] - Psi_k_mask[col]
+    dist_embedded = np.sqrt(np.sum(diff * diff, axis=1)) # (num_pairs,)
     
-    disc_lip_const = dist_embedded / d_e_vals[None, :] # (B, num_pairs)
+    disc_lip_const = dist_embedded / d_e_vals # (num_pairs,)
     
-    return np.max(disc_lip_const, axis=1) / (np.min(disc_lip_const, axis=1) + 1e-12)
+    return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
 
 
 def cost_of_moving_alignment_error(
