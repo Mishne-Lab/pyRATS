@@ -1282,38 +1282,60 @@ def compute_Lpinv_helpers(W):
 def compute_Lpinv_MT(Lpinv_helpers, B):
     D_1_inv_sqrt, D_2_inv_sqrt, U1, U2, V1, V2, Sigma_1, Sigma_2 = Lpinv_helpers
     n = D_1_inv_sqrt.shape[0]
-    B_mean = B.mean(axis=1)
+    # M_d is the number of rows in B, which is M * d
+    Md = B.shape[0]
+    M = B.shape[1] - n
+
+    B_mean = np.asarray(B.mean(axis=1))
     if len(B_mean.shape) == 1:
         B_mean = B_mean[:, None]
-    B_n = B - B_mean
-    B_n = np.asarray(B_n)
-    B1T = D_1_inv_sqrt * (B_n[:, :n].T)
-    B2T = D_2_inv_sqrt.T * (B_n[:, n:].T)
+    
+    # B is (Md, n+M)
+    # B1 = B[:, :n] (Md, n)
+    # B2 = B[:, n:] (Md, M)
+    # B_mean is (Md, 1)
+    
+    # We want B1T = D_1_inv_sqrt * (B1.T - B_mean.T)
+    # Scaled sparse matrices for the "B" part
+    B1T_sparse_scaled = B[:, :n].T.multiply(D_1_inv_sqrt) # (n, Md)
+    B2T_sparse_scaled = B[:, n:].T.multiply(D_2_inv_sqrt.T) # (M, Md)
 
-    U1TB1T = np.matmul(U1.T, B1T)
-    U2TB1T = np.matmul(U2.T, B1T)
-    V1TB2T = np.matmul(V1.T, B2T)
-    V2TB2T = np.matmul(V2.T, B2T)
+    # Pre-calculate common projections to avoid dense B1T/B2T
+    # U1TB1T = U1.T @ B1T_scaled - (U1.T @ D_1_inv_sqrt) @ B_mean.T
+    U1T_D1 = U1.T @ D_1_inv_sqrt # (m1, 1)
+    U1TB1T = (U1.T @ B1T_sparse_scaled) - (U1T_D1 @ B_mean.T)
+    
+    U2T_D1 = U2.T @ D_1_inv_sqrt
+    U2TB1T = (U2.T @ B1T_sparse_scaled) - (U2T_D1 @ B_mean.T)
+    
+    V1T_D2 = V1.T @ D_2_inv_sqrt.T # (m1, 1)
+    V1TB2T = (V1.T @ B2T_sparse_scaled) - (V1T_D2 @ B_mean.T)
+    
+    V2T_D2 = V2.T @ D_2_inv_sqrt.T
+    V2TB2T = (V2.T @ B2T_sparse_scaled) - (V2T_D2 @ B_mean.T)
 
-    temp1 = (
-        -0.75 * np.matmul(U1, U1TB1T)
-        - 0.25 * np.matmul(U1, V1TB2T)
-        + np.matmul(U2, ((Sigma_1 - 1)) * (U2TB1T))
-        + np.matmul(U2, Sigma_2 * (V2TB2T))
-        + B1T
-    )
-    temp1 = temp1 * D_1_inv_sqrt
+    # Allocate final result matrix to avoid copies from concatenation
+    temp = np.empty((n + M, Md))
+    
+    # Compute temp1 directly into temp[:n, :]
+    # temp1 = -0.75 * U1 @ U1TB1T - 0.25 * U1 @ V1TB2T + U2 @ ((Sigma_1 - 1) * U2TB1T) + U2 @ Sigma_2 * V2TB2T + B1T
+    temp[:n, :] = B1T_sparse_scaled.todense()
+    temp[:n, :] -= D_1_inv_sqrt @ B_mean.T
+    temp[:n, :] += -0.75 * (U1 @ U1TB1T) - 0.25 * (U1 @ V1TB2T)
+    temp[:n, :] += U2 @ ((Sigma_1 - 1) * U2TB1T) + U2 @ (Sigma_2 * V2TB2T)
+    temp[:n, :] *= D_1_inv_sqrt
 
-    temp2 = (
-        -0.25 * np.matmul(V1, U1TB1T)
-        + 0.25 * np.matmul(V1, V1TB2T)
-        + np.matmul(V2, Sigma_2 * (U2TB1T))
-        + np.matmul(V2, Sigma_1 * (V2TB2T))
-    )
-    temp2 = temp2 * D_2_inv_sqrt.T
+    # Compute temp2 directly into temp[n:, :]
+    # temp2 = -0.25 * V1 @ U1TB1T + 0.25 * V1 @ V1TB2T + V2 @ (Sigma_2 * U2TB1T) + V2 @ (Sigma_1 * V2TB2T)
+    # B2T is not added to temp2 in the original code, but B2T is used implicitly?
+    # Wait, original code: temp2 = (-0.25 * V1@U1TB1T ...)*D_2_inv_sqrt.T
+    # There is NO B2T in temp2. Correct.
+    temp[n:, :] = -0.25 * (V1 @ U1TB1T) + 0.25 * (V1 @ V1TB2T)
+    temp[n:, :] += V2 @ (Sigma_2 * U2TB1T) + V2 @ (Sigma_1 * V2TB2T)
+    temp[n:, :] *= D_2_inv_sqrt.T
 
-    temp = np.concatenate((temp1, temp2), axis=0)
-    temp = temp - np.mean(temp, axis=0, keepdims=True)
+    # temp = temp - np.mean(temp, axis=0, keepdims=True)
+    temp -= np.mean(temp, axis=0, keepdims=True)
     return temp
 
 
