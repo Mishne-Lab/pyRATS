@@ -37,7 +37,8 @@ jobs:
 
       - name: Overlay Latest Benchmark Script
         run: |
-          git checkout ${{ github.sha }} -- tests/scripts/benchmark.py
+          git fetch origin ${{ github.sha }} --depth=1
+          git checkout FETCH_HEAD -- tests/scripts/benchmark.py
 
       - name: Set up Python
         uses: actions/setup-python@v4
