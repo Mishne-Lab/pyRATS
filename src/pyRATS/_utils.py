@@ -1113,6 +1113,7 @@ def compute_final_embedding(
             if patience_ctr <= 0:
                 break
 
+    Utildeg = None
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
 
