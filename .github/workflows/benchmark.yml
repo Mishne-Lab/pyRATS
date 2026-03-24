@@ -38,6 +38,7 @@ jobs:
         run: |
           git fetch origin ${{ github.sha }} --depth=1
           git checkout FETCH_HEAD -- tests/scripts/benchmark.py
+          git checkout FETCH_HEAD -- examples/__init__.py
 
       - name: Set up Python
         uses: actions/setup-python@v4
