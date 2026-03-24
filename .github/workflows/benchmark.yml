@@ -31,14 +31,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Overlay Latest Benchmark Script
+      - name: Overlay src/ from Comparison Ref
+        if: matrix.ref != github.sha
         run: |
-          git fetch origin ${{ github.sha }} --depth=1
-          git checkout FETCH_HEAD -- tests/scripts/benchmark.py
-          git checkout FETCH_HEAD -- examples/__init__.py
+          git fetch origin ${{ matrix.ref }} --depth=1
+          git checkout FETCH_HEAD -- src/
 
       - name: Set up Python
         uses: actions/setup-python@v4
