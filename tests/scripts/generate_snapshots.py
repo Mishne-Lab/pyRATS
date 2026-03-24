@@ -127,6 +127,6 @@ if __name__ == "__main__":
 
     argslist = list(itertools.product(ks, eta_mins, cost_fn_names, dataset_names))
 
-    Parallel(n_jobs=-1)(
+    Parallel(n_jobs=1)(
         delayed(run_model)(*args, dirpath, force_compute) for args in argslist
     )
