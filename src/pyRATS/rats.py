@@ -505,16 +505,16 @@ class RATS:
         # neigh_inds[i] are the k neighbour indices of point i (same as
         # connectivity_matrix used below, extracted once here for clarity).
         neigh_inds = self.U.indices.reshape(n, self.k)  # (n, k)
-        pair_i, pair_j = np.triu_indices(self.k, k=1)   # all upper-triangle pairs
-        row_idx = neigh_inds[:, pair_i].ravel()           # (n * num_pairs,)
-        col_idx = neigh_inds[:, pair_j].ravel()           # (n * num_pairs,)
+        pair_i, pair_j = np.triu_indices(self.k, k=1)  # all upper-triangle pairs
+        row_idx = neigh_inds[:, pair_i].ravel()  # (n * num_pairs,)
+        col_idx = neigh_inds[:, pair_j].ravel()  # (n * num_pairs,)
         num_pairs = len(pair_i)
         original_dists = np.asarray(
             self.neighborhood_graph_sym[row_idx, col_idx]
         ).reshape(n, num_pairs)
 
         embedded_datapoints = self.param.batched_eval_(
-            range(n), self.U.indices.reshape(n, self.k)
+            {"view_index": range(n), "data_mask": self.U.indices.reshape(n, self.k)}
         )  # tested and they are equivalent
         embedded_dists = batched_pdist(embedded_datapoints)
         disc_lip_const = np.divide(
@@ -538,60 +538,44 @@ class RATS:
         connectivity_matrix = self.U.indices.reshape(n, -1)
         param_changed = np.arange(n)
         future_use_phi_of = np.arange(n, dtype=int)
-        future_use_phi_of_ = np.arange(n, dtype=int)
 
         while len(param_changed) > 0:
             reconsider_mask = np.isin(connectivity_matrix, param_changed) & (
                 connectivity_matrix != np.arange(n)[:, None]
             )
-            param_changed = np.array([])
 
-            for i in range(connectivity_matrix.shape[1]):
-
-                use_phi_of = connectivity_matrix[:, i][
-                    reconsider_mask[:, i]
-                ]  # select neighborhood indices of the Phi's to use
-                if len(use_phi_of) == 0:
-                    continue
-                neighbors_to_reconsider = connectivity_matrix[
-                    reconsider_mask[:, i]
-                ]  # select datapoint and neighborhood indices who's neighborhood must be re-evaluated
-                points_to_reconsider = np.where(reconsider_mask[:, i])[
-                    0
-                ]  # list of indices
-
-                batch_embedded_datapoints = self.param.batched_eval_(
-                    future_use_phi_of[use_phi_of], neighbors_to_reconsider
-                )
-                batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
-                batch_original_dists = original_dists[points_to_reconsider]
-
-                disc_lip_const = np.divide(
-                    batch_embedded_dists,
-                    batch_original_dists,
-                    out=np.full_like(batch_embedded_dists, np.nan),
-                    where=batch_original_dists != 0,
-                )
-                zeta_ = np.nanmax(disc_lip_const, axis=1) / (
-                    np.nanmin(disc_lip_const, axis=1) + 1e-12
-                )
-
-                swap_has_improved_point = points_to_reconsider[
-                    np.where(zeta_ < zeta[points_to_reconsider])[0]
-                ]  # indices of points where swapping by the i'th neighbor improves the local distortion
-
-                param_changed = np.union1d(param_changed, swap_has_improved_point)
-                zeta[points_to_reconsider] = np.minimum(
-                    zeta_, zeta[points_to_reconsider]
-                )
-
-                future_use_phi_of_[swap_has_improved_point] = future_use_phi_of[
-                    connectivity_matrix[:, i][swap_has_improved_point]
+            def work_range(
+                start_end,
+            ):
+                start, end = start_end
+                return [
+                    self._process_column(
+                        i,
+                        connectivity_matrix,
+                        reconsider_mask[:, i],
+                        self.param,
+                        future_use_phi_of,
+                        original_dists,
+                    )
+                    for i in range(start, end)
                 ]
 
-            future_use_phi_of = (
-                future_use_phi_of_.copy()
-            )  # this is necessary for some reason
+            chunk_sz = connectivity_matrix.shape[1] // self.n_jobs
+            ranges = [(i * chunk_sz, (i + 1) * chunk_sz) for i in range(self.n_jobs)]
+            ranges[-1] = (ranges[-1][0], connectivity_matrix.shape[1])
+            zetas = Parallel(n_jobs=self.n_jobs)(delayed(work_range)(r) for r in ranges)
+
+            zetas = np.vstack(zetas).T
+
+            zeta_ = np.min(zetas, axis=1)
+            param_changed = np.where(zeta > zeta_)[0]
+            future_use_phi_of[param_changed] = future_use_phi_of[
+                connectivity_matrix[
+                    param_changed, np.argmin(zetas, axis=1)[param_changed]
+                ]
+            ]
+            zeta = np.where(zeta < zeta_, zeta, zeta_)
+
             if self.verbose:
                 print(
                     "#Param replaced: %d, max distortion: %f"
@@ -606,3 +590,49 @@ class RATS:
                 f"Maximum local distortion after postprocessing is: %0.4f"
                 % (np.max(self.param.zeta))
             )
+
+    def _process_column(
+        self,
+        i,
+        connectivity_matrix,
+        reconsider_mask,
+        param,
+        future_use_phi_of,
+        original_dists,
+    ):
+        zeta = np.zeros(len(connectivity_matrix)) + np.inf
+
+        use_phi_of = connectivity_matrix[:, i][
+            reconsider_mask
+        ]  # select neighborhood indices of the Phi's to use
+
+        if len(use_phi_of) == 0:
+            return zeta
+
+        neighbors_to_reconsider = connectivity_matrix[
+            reconsider_mask
+        ]  # select datapoint and neighborhood indices who's neighborhood must be re-evaluated
+        points_to_reconsider = np.where(reconsider_mask)[0]  # list of indices
+
+        batch_embedded_datapoints = param.batched_eval_(
+            {
+                "view_index": future_use_phi_of[use_phi_of],
+                "data_mask": neighbors_to_reconsider,
+            }
+        )
+        batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
+        batch_original_dists = original_dists[points_to_reconsider]
+
+        disc_lip_const = np.divide(
+            batch_embedded_dists,
+            batch_original_dists,
+            out=np.full_like(batch_embedded_dists, np.nan),
+            where=batch_original_dists != 0,
+        )
+
+        zeta_ = np.nanmax(disc_lip_const, axis=1) / (
+            np.nanmin(disc_lip_const, axis=1) + 1e-12
+        )
+        zeta[points_to_reconsider] = zeta_
+        return zeta
+ 
