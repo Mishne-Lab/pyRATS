@@ -694,8 +694,6 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
     for eta in tqdm(
         range(2, eta_min + 1), desc="Intermediate views", disable=not verbose
     ):
-        if verbose:
-            print("eta = %d." % eta)
             # tqdm.write(
             #     "#non-empty views with sz < %d = %d"
             #     % (eta, np.sum((n_C > 0) * (n_C < eta)))

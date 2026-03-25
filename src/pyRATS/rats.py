@@ -534,8 +534,6 @@ class RATS:
                 self.verbose,
                 self.n_jobs,
             )
-            if self.verbose:
-                print("Pruning and cleaning up.")
             # Prune empty clusters
             non_empty_C = n_C > 0
             M = np.sum(non_empty_C)
@@ -561,8 +559,6 @@ class RATS:
 
             np.random.seed(42)
             self.param.noise_seed = np.random.randint(M * M, size=M)
-            if self.verbose:
-                print("Done.")
         else:
             c = np.arange(n, dtype=int)
             C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(n, n), dtype=bool)
