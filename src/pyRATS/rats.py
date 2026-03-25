@@ -4,6 +4,7 @@ from scipy.sparse import csr_matrix
 
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 from pyRATS._utils import (
     nearest_neighbors,
@@ -313,18 +314,35 @@ class RATS:
         y : array-like, shape (n_samples, d)
             X transformed in the new space.
         """
+        n_steps = 5 if self.to_postprocess else 4
+        current_step = 1
 
+        if self.verbose:
+            print(f"[{current_step}/{n_steps}] Fitting neighborhood graph...")
         self._fit_nbrhd_graph(X)
+        current_step += 1
 
         # Construct low dimensional local views
+        if self.verbose:
+            print(f"[{current_step}/{n_steps}] Fitting local views...")
         self._fit_local_views(X)
+        current_step += 1
+
         if self.to_postprocess:
+            if self.verbose:
+                print(f"[{current_step}/{n_steps}] Postprocessing local parameters...")
             self._postprocess()
+            current_step += 1
 
         # Construct intermediate views
+        if self.verbose:
+            print(f"[{current_step}/{n_steps}] Clustering intermediate views...")
         c, n_C = self._fit_intermediate_views()
+        current_step += 1
 
         # Construct Global views
+        if self.verbose:
+            print(f"[{current_step}/{n_steps}] Aligning global views...")
         y = self._fit_global_views(c, n_C)
 
         return y
@@ -660,21 +678,21 @@ class RATS:
 
         self.param.zeta = zeta
 
-        if self.verbose:
-            print(
-                r"Maximum local distortion before postprocessing is: %0.4f"
-                % np.max(zeta)
-            )
 
         connectivity_matrix = self.U.indices.reshape(n, -1)
-        param_changed = np.arange(n)
         future_use_phi_of = np.arange(n, dtype=int)
 
+        pbar = None
+        if self.verbose:
+            pbar = tqdm(total=n, desc="Refining parameters", unit="pts", leave=False)
+
+        param_changed = np.arange(n)
         while len(param_changed) > 0:
             changed_mask = np.zeros(n, dtype=bool)
             changed_mask[param_changed] = True
-            reconsider_mask = changed_mask[connectivity_matrix] & (
-                connectivity_matrix != np.arange(n)[:, None]
+            reconsider_mask = (
+                changed_mask[connectivity_matrix]
+                & (connectivity_matrix != np.arange(n)[:, None])
             )
 
             # Split the k columns into n_jobs chunks and process each chunk in
@@ -718,16 +736,10 @@ class RATS:
             zeta = np.minimum(zeta, zeta_min)
 
             if self.verbose:
-                print(
-                    "#Param replaced: %d, max distortion: %f"
-                    % (len(param_changed), np.max(zeta))
-                )
+                pbar.update(n - len(param_changed) - pbar.n)
 
         self.param.zeta = zeta.copy()
 
         self.param.replace_(future_use_phi_of)
         if self.verbose:
-            print(
-                f"Maximum local distortion after postprocessing is: %0.4f"
-                % (np.max(self.param.zeta))
-            )
+            pbar.close()

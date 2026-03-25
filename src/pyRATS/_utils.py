@@ -15,6 +15,7 @@ from scipy.sparse.csgraph import (
     connected_components,
     breadth_first_order,
 )
+from tqdm import tqdm
 
 import os
 
@@ -125,7 +126,10 @@ def lpca(X, d, U, n_jobs, verbose=False):
 
     chunk_sz = int(n / n_jobs)
     results = Parallel(n_jobs=n_jobs)(
-        delayed(target_proc)(i, chunk_sz) for i in range(n_jobs)
+        delayed(target_proc)(i, chunk_sz)
+        for i in tqdm(
+            range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+        )
     )
 
     for i in range(len(results)):
@@ -136,7 +140,7 @@ def lpca(X, d, U, n_jobs, verbose=False):
         param.n_pc_dir_chosen[start_ind:end_ind] = n_pc_dir_chosen_
 
     if verbose:
-        print("local_param: all %d points processed..." % n)
+        tqdm.write("local_param: all %d points processed..." % n)
 
     return param
 
@@ -209,14 +213,17 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
 
     chunk_sz = int(n / n_jobs)
     results = Parallel(n_jobs=n_jobs)(
-        delayed(target_proc)(p_num, chunk_sz) for p_num in range(n_jobs)
+        delayed(target_proc)(p_num, chunk_sz)
+        for p_num in tqdm(
+            range(n_jobs), desc="KPCA", unit="chunk", leave=False, disable=not verbose
+        )
     )
 
     for start_ind, end_ind, model_ in results:
         local_param.model[start_ind:end_ind] = model_
 
     if verbose:
-        print("local_param: all %d points processed..." % n)
+        tqdm.write("local_param: all %d points processed..." % n)
     return local_param
 
 
@@ -684,16 +691,16 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
     U_csc = U.tocsc()
 
     # Vary eta from 2 to eta_{min}
-    if verbose:
-        print("Constructing intermediate views.")
-    for eta in range(2, eta_min + 1):
+    for eta in tqdm(
+        range(2, eta_min + 1), desc="Intermediate views", disable=not verbose
+    ):
         if verbose:
             print("eta = %d." % eta)
-            print(
-                "#non-empty views with sz < %d = %d"
-                % (eta, np.sum((n_C > 0) * (n_C < eta)))
-            )
-            print("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
+            # tqdm.write(
+            #     "#non-empty views with sz < %d = %d"
+            #     % (eta, np.sum((n_C > 0) * (n_C < eta)))
+            # )
+            # tqdm.write("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
 
         def target_proc(p_num, chunk_sz, n_, Utilde, n_C, c):
             start_ind = p_num * chunk_sz
@@ -713,7 +720,13 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         chunk_sz = int(n / n_jobs)
         results = Parallel(n_jobs=n_jobs)(
             delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
-            for p_num in range(n_jobs)
+            for p_num in tqdm(
+                range(n_jobs),
+                desc=f"eta={eta}",
+                unit="chunk",
+                leave=False,
+                disable=not verbose,
+            )
         )
         for start_ind, end_ind, cost_, dest_ in results:
             cost[start_ind:end_ind] = cost_
@@ -724,10 +737,19 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         k = np.argmin(cost)
         cost_star = cost[k]
 
-        if verbose:
-            print("Costs computed when eta = %d." % eta)
+        # if verbose:
+        #     tqdm.write("Costs computed when eta = %d." % eta)
 
         # Loop until minimum cost is inf
+        pbar_merge = None
+        if verbose:
+            pbar_merge = tqdm(
+                total=np.sum(n_C[c] < eta),
+                desc="Merging",
+                unit="pts",
+                leave=False,
+            )
+
         total_len_S = 0
         ctr = 0
         while cost_star < np.inf:
@@ -763,19 +785,23 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
                     k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max, n_jobs=1
                 )
 
+            if verbose:
+                pbar_merge.update(1)
+
             k = np.argmin(cost)
             cost_star = cost[k]
 
         if verbose:
-            print(
-                "ctr=%d, total_len_S=%d, avg_len_S=%0.3f"
-                % (ctr, total_len_S, total_len_S / (ctr + 1e-12))
-            )
-            print(
-                "Remaining #nodes in views with sz < %d = %d"
-                % (eta, np.sum(n_C[c] < eta))
-            )
-            print("Done with eta = %d." % eta)
+            pbar_merge.close()
+            # tqdm.write(
+            #     "ctr=%d, total_len_S=%d, avg_len_S=%0.3f"
+            #     % (ctr, total_len_S, total_len_S / (ctr + 1e-12))
+            # )
+            # tqdm.write(
+            #     "Remaining #nodes in views with sz < %d = %d"
+            #     % (eta, np.sum(n_C[c] < eta))
+            # )
+            # tqdm.write("Done with eta = %d." % eta)
 
     return c, n_C
 
@@ -866,16 +892,6 @@ def compute_seq_of_views(
     W_data = overlap_svals[:, -1]
     for i in range(overlap_svals.shape[1] - 2, -1, -1):
         mask = W_data == 0
-        if verbose:
-            print(
-                "Iter:",
-                i,
-                ":: Updating scores of",
-                np.sum(mask),
-                "edges out of",
-                W_data.shape[0],
-                "edges.",
-            )
         n_zero_elem = np.sum(mask)
         if n_zero_elem == 0:
             break
@@ -1136,7 +1152,9 @@ def compute_final_embedding(
     Utilde_t = Utilde.copy()
 
     # Refine global embedding y
-    for it0 in range(max_iter):
+    for it0 in tqdm(
+        range(max_iter), desc="RGD alignment", unit="iter", disable=not verbose
+    ):
 
         if to_tear:
             Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
@@ -1150,8 +1168,6 @@ def compute_final_embedding(
             err = compute_alignment_err(d, Utilde_t, param, verbose)
             E_Gamma_t = Utilde_t.nnz
             err = err / E_Gamma_t
-            if verbose:
-                print("Alignment error: %0.6f" % (err), flush=True)
             if prev_err is not None:
                 if (np.abs(err - prev_err) / (prev_err + 1e-12) < tol) and (
                     np.abs(E_Gamma_t - prev_edges) / (prev_edges + 1e-12) < tol
@@ -1221,9 +1237,6 @@ def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
 
     CC, Lpinv_BT, _, _ = build_ortho_optim(d, Utilde, param, verbose)
     M, n = Utilde.shape
-
-    if verbose:
-        print("Descent starts", flush=True)
 
     Tstar = update(
         alpha, max_internal_iter, np.tile(np.eye(d), (1, M)), CC, M, d
@@ -1433,13 +1446,6 @@ def build_ortho_optim(d, Utilde, param, verbose):
     B_val_all = np.concatenate([B_cluster_vals, B_data_vals])
     
     B = csr_matrix((B_val_all, (B_row_all, B_col_all)), shape=(M * d, n + M))
-
-    if verbose:
-        print("min and max weights:", np.array(W_vals_all).min(), np.array(W_vals_all).max())
-        print(
-            f"Computing Pseudoinverse of a matrix of L of size {n} + {M} multiplied with B",
-            flush=True,
-        )
 
     Lpinv_helpers = compute_Lpinv_helpers(W)
     Lpinv_BT = compute_Lpinv_MT(Lpinv_helpers, B)
