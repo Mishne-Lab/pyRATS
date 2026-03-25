@@ -18,11 +18,11 @@ from scipy.sparse.csgraph import (
 
 import os
 
-def _get_available_memory():
-    """Returns the available memory in bytes.
+def _get_available_memory(n_jobs=1):
+    """Returns the available memory in bytes, scaled by n_jobs.
     
     Checks for PYRATS_MEMORY_LIMIT environment variable, then tries to use psutil,
-    and finally falls back to a 4GB default.
+    and finally falls back to a 4GB default (divided by n_jobs).
     """
     # 1. Environment variable override
     limit = os.environ.get("PYRATS_MEMORY_LIMIT")
@@ -35,13 +35,14 @@ def _get_available_memory():
     # 2. Try psutil for dynamic discovery
     try:
         import psutil
-        # Use 75% of available RAM as a safe upper bound for our buffer
-        return int(psutil.virtual_memory().available * 0.75)
+        # Use a fraction of available RAM as a safe upper bound for our buffer,
+        # divided by the number of parallel workers.
+        return int(psutil.virtual_memory().available * 0.75 / n_jobs)
     except (ImportError, AttributeError):
         pass
         
-    # 3. Fallback to 2GB
-    return 2 * 1024 * 1024 * 1024
+    # 3. Fallback to 4GB total (divided by workers)
+    return (4 * 1024 * 1024 * 1024) // n_jobs
 
 
 def lpca(X, d, U, n_jobs, verbose=False):
@@ -387,7 +388,7 @@ def nearest_neighbors(X, k, metric, sort_results=True, n_jobs=-1):
 
 
 def cost_of_moving_distortion(
-    k, d_e, neigh_ind_k, U_k, local_param, c, n_C, Utilde, eta_min, eta_max
+    k, d_e, neigh_ind_k, U_k, local_param, c, n_C, Utilde, eta_min, eta_max, n_jobs=1
 ):
     """Computes the minimum cost and destination cluster possible
     when merging k with its neighboring clusters.
@@ -513,7 +514,7 @@ def compute_zeta(d_e_mask0, Psi_k_mask):
 
 
 def cost_of_moving_alignment_error(
-    k, d_e, neigh_ind_k, U_k, param, c, n_C, Utilde, eta_min, eta_max
+    k, d_e, neigh_ind_k, U_k, param, c, n_C, Utilde, eta_min, eta_max, n_jobs=1
 ):
     """Computes the minimum cost and destination cluster possible
     when merging k with its neighboring clusters.
@@ -588,6 +589,7 @@ def cost_of_moving_alignment_error(
     evals = param.batched_eval_(
         c_U_k_uniq_k,
         np.broadcast_to(U_k_list, [len(c_U_k_uniq_k), len(U_k_list)]),
+        n_jobs=n_jobs
     )
 
     m = c_U_k_uniq_k == k
@@ -704,7 +706,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             dest_ = np.zeros(end_ind - start_ind, dtype="int") - 1
             for i, k in enumerate(range(start_ind, end_ind)):
                 cost_[i], dest_[i] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
+                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max, n_jobs=n_jobs
                 )
             return start_ind, end_ind, cost_, dest_
 
@@ -758,7 +760,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
             for k in S:
                 cost[k], dest[k] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max
+                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max, n_jobs=1
                 )
 
             k = np.argmin(cost)
@@ -1581,7 +1583,7 @@ class Param:
         self.add_dim = False
         self.standardize = False
 
-    def batched_eval_(self, view_index, data_mask):
+    def batched_eval_(self, view_index, data_mask, n_jobs=1):
         """Maps multiple points to the new space through their local (K-)PCA prameterizations.
 
         Parameters
@@ -1591,6 +1593,9 @@ class Param:
 
         data_mask : array-like, shape (n_points, n_neighbors)
             List of points to map to the embedding dimension for each point in 'view_index'
+
+        n_jobs : int, default=1
+            Number of parallel jobs. Used to scale memory limits.
         """
 
         ks = view_index
@@ -1603,7 +1608,7 @@ class Param:
             n_features = self.X.shape[1]
             
             # Calculate chunk size based on available memory
-            memory_limit = _get_available_memory()
+            memory_limit = _get_available_memory(n_jobs=n_jobs)
             itemsize = self.X.dtype.itemsize
             # Target buffer size per chunk: (chunk_size * n_neighbors * n_features * itemsize)
             chunk_size = max(1, memory_limit // (n_neighbors * n_features * itemsize))

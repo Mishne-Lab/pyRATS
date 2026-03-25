@@ -28,6 +28,7 @@ def _postprocess_col_range(
     future_use_phi_of,
     original_dists,
     n,
+    n_jobs=1,
 ):
     """Process a contiguous range of neighbor-columns [start, end) for _postprocess.
 
@@ -47,7 +48,7 @@ def _postprocess_col_range(
         points_to_reconsider = np.where(col_mask)[0]
 
         batch_embedded_datapoints = param.batched_eval_(
-            future_use_phi_of[use_phi_of], neighbors_to_reconsider
+            future_use_phi_of[use_phi_of], neighbors_to_reconsider, n_jobs=n_jobs
         )
         batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
         batch_original_dists = original_dists[points_to_reconsider]
@@ -697,6 +698,7 @@ class RATS:
                     future_use_phi_of,
                     original_dists,
                     n,
+                    n_jobs=self.n_jobs,
                 )
                 for s, e in ranges
             )
