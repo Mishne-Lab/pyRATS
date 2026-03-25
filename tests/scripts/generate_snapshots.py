@@ -46,6 +46,40 @@ def load_dataset(name):
     return X, labels
 
 
+def construct_rats(
+    n_components=2,
+    n_neighbors=28,
+    min_cluster_size=5,
+    cost_function="alignment",
+    n_iter=20,
+    nu=3,
+    verbose=False,
+):
+    """Helper to instantiate RATS with fallback for older versions of the code."""
+    try:
+        # Try new sklearn-style names
+        return rats.RATS(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            min_cluster_size=min_cluster_size,
+            cost_function=cost_function,
+            n_iter=n_iter,
+            nu=nu,
+            verbose=verbose,
+        )
+    except TypeError:
+        # Fallback to old names
+        return rats.RATS(
+            d=n_components,
+            k=n_neighbors,
+            eta_min=min_cluster_size,
+            cost_fn_name=cost_function,
+            max_iter=n_iter,
+            nu=nu,
+            verbose=verbose,
+        )
+
+
 def run_model(n_neighbors, min_cluster_size, cost_function, dataset_name, dirpath, force_compute=False):
     fname = f"dataset={dataset_name}_k={n_neighbors}_eta_min={min_cluster_size}_cost-fn={cost_function}.res"
     path = os.path.join(dirpath, fname)
@@ -55,7 +89,7 @@ def run_model(n_neighbors, min_cluster_size, cost_function, dataset_name, dirpat
 
     X, _ = load_dataset(dataset_name)
 
-    model = rats.RATS(
+    model = construct_rats(
         n_components=2,
         n_neighbors=n_neighbors,
         cost_function=cost_function,

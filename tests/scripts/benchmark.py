@@ -12,6 +12,39 @@ if repo_root not in sys.path:
 from pyRATS import rats
 from examples import datasets
 
+def construct_rats(
+    n_components=2,
+    n_neighbors=14,
+    min_cluster_size=5,
+    cost_function="distortion",
+    n_iter=3,
+    nu=4,
+    verbose=False,
+):
+    """Helper to instantiate RATS with fallback for older versions of the code."""
+    try:
+        # Try new sklearn-style names
+        return rats.RATS(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            min_cluster_size=min_cluster_size,
+            cost_function=cost_function,
+            n_iter=n_iter,
+            nu=nu,
+            verbose=verbose,
+        )
+    except TypeError:
+        # Fallback to old names
+        return rats.RATS(
+            d=n_components,
+            k=n_neighbors,
+            eta_min=min_cluster_size,
+            cost_fn_name=cost_function,
+            max_iter=n_iter,
+            nu=nu,
+            verbose=verbose,
+        )
+
 def run_benchmark(n_samples, n_neighbors=14, min_cluster_size=5, cost_function="distortion"):
     sys.stderr.write(f"Running benchmark for n={n_samples}, n_neighbors={n_neighbors}, min_cluster_size={min_cluster_size}...\n")
     sys.stderr.flush()
@@ -20,7 +53,7 @@ def run_benchmark(n_samples, n_neighbors=14, min_cluster_size=5, cost_function="
     ds = datasets.Datasets()
     X, _, _ = ds.kleinbottle4d(n=n_samples)
     
-    model = rats.RATS(
+    model = construct_rats(
         n_components=2,
         n_neighbors=n_neighbors,
         cost_function=cost_function,
