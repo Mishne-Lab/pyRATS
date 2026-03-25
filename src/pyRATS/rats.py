@@ -19,6 +19,57 @@ from pyRATS._utils import (
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 
+def _postprocess_col_range(
+    start,
+    end,
+    connectivity_matrix,
+    reconsider_mask,
+    param,
+    future_use_phi_of,
+    original_dists,
+    n,
+):
+    """Process a contiguous range of neighbor-columns [start, end) for _postprocess.
+
+    Returns the element-wise minimum distortion and the corresponding column
+    index across the processed range, both as length-n arrays.
+    """
+    local_zeta_min = np.full(n, np.inf)
+    local_best_col = np.zeros(n, dtype=int)
+
+    for i in range(start, end):
+        col_mask = reconsider_mask[:, i]
+        use_phi_of = connectivity_matrix[:, i][col_mask]
+        if len(use_phi_of) == 0:
+            continue
+
+        neighbors_to_reconsider = connectivity_matrix[col_mask]
+        points_to_reconsider = np.where(col_mask)[0]
+
+        batch_embedded_datapoints = param.batched_eval_(
+            future_use_phi_of[use_phi_of], neighbors_to_reconsider
+        )
+        batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
+        batch_original_dists = original_dists[points_to_reconsider]
+
+        disc_lip_const = np.divide(
+            batch_embedded_dists,
+            batch_original_dists,
+            out=np.full_like(batch_embedded_dists, np.nan),
+            where=batch_original_dists != 0,
+        )
+        col_zeta = np.full(n, np.inf)
+        col_zeta[points_to_reconsider] = np.nanmax(disc_lip_const, axis=1) / (
+            np.nanmin(disc_lip_const, axis=1) + 1e-12
+        )
+
+        improved = col_zeta < local_zeta_min
+        local_best_col[improved] = i
+        local_zeta_min = np.minimum(local_zeta_min, col_zeta)
+
+    return local_zeta_min, local_best_col
+
+
 class RATS:
     """Riemannian Alignment of Tangent Spaces
 
@@ -545,37 +596,44 @@ class RATS:
                 connectivity_matrix != np.arange(n)[:, None]
             )
 
-            def work_range(
-                start_end,
-            ):
-                start, end = start_end
-                return [
-                    self._process_column(
-                        i,
-                        connectivity_matrix,
-                        reconsider_mask[:, i],
-                        self.param,
-                        future_use_phi_of,
-                        original_dists,
-                    )
-                    for i in range(start, end)
-                ]
+            # Split the k columns into n_jobs chunks and process each chunk in
+            # a separate worker.  Each worker returns its local (zeta_min,
+            # best_col) for the columns it owns; we then do a final
+            # min-reduction here.  This mirrors the target_proc pattern used
+            # throughout _utils.py (lpca, best, …) while keeping memory
+            # bounded to one chunk of columns per worker at a time.
+            k_cols = connectivity_matrix.shape[1]
+            chunk_sz = max(1, k_cols // self.n_jobs)
+            ranges = [(p * chunk_sz, (p + 1) * chunk_sz) for p in range(self.n_jobs)]
+            ranges[-1] = (ranges[-1][0], k_cols)  # extend last chunk to cover remainder
+            ranges = [(s, e) for s, e in ranges if s < k_cols]  # drop empty ranges
 
-            chunk_sz = connectivity_matrix.shape[1] // self.n_jobs
-            ranges = [(i * chunk_sz, (i + 1) * chunk_sz) for i in range(self.n_jobs)]
-            ranges[-1] = (ranges[-1][0], connectivity_matrix.shape[1])
-            zetas = Parallel(n_jobs=self.n_jobs)(delayed(work_range)(r) for r in ranges)
+            results = Parallel(n_jobs=self.n_jobs)(
+                delayed(_postprocess_col_range)(
+                    s, e,
+                    connectivity_matrix,
+                    reconsider_mask,
+                    self.param,
+                    future_use_phi_of,
+                    original_dists,
+                    n,
+                )
+                for s, e in ranges
+            )
 
-            zetas = np.vstack(zetas).T
+            # Reduce chunk results into a single (zeta_min, best_col).
+            zeta_min = np.full(n, np.inf)
+            best_col = np.zeros(n, dtype=int)
+            for chunk_zeta_min, chunk_best_col in results:
+                improved = chunk_zeta_min < zeta_min
+                best_col[improved] = chunk_best_col[improved]
+                zeta_min = np.minimum(zeta_min, chunk_zeta_min)
 
-            zeta_ = np.min(zetas, axis=1)
-            param_changed = np.where(zeta > zeta_)[0]
+            param_changed = np.where(zeta > zeta_min)[0]
             future_use_phi_of[param_changed] = future_use_phi_of[
-                connectivity_matrix[
-                    param_changed, np.argmin(zetas, axis=1)[param_changed]
-                ]
+                connectivity_matrix[param_changed, best_col[param_changed]]
             ]
-            zeta = np.where(zeta < zeta_, zeta, zeta_)
+            zeta = np.minimum(zeta, zeta_min)
 
             if self.verbose:
                 print(
@@ -591,47 +649,3 @@ class RATS:
                 f"Maximum local distortion after postprocessing is: %0.4f"
                 % (np.max(self.param.zeta))
             )
-
-    def _process_column(
-        self,
-        i,
-        connectivity_matrix,
-        reconsider_mask,
-        param,
-        future_use_phi_of,
-        original_dists,
-    ):
-        zeta = np.zeros(len(connectivity_matrix)) + np.inf
-
-        use_phi_of = connectivity_matrix[:, i][
-            reconsider_mask
-        ]  # select neighborhood indices of the Phi's to use
-
-        if len(use_phi_of) == 0:
-            return zeta
-
-        neighbors_to_reconsider = connectivity_matrix[
-            reconsider_mask
-        ]  # select datapoint and neighborhood indices who's neighborhood must be re-evaluated
-        points_to_reconsider = np.where(reconsider_mask)[0]  # list of indices
-
-        batch_embedded_datapoints = param.batched_eval_(
-            future_use_phi_of[use_phi_of],
-            neighbors_to_reconsider,
-        )
-        batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
-        batch_original_dists = original_dists[points_to_reconsider]
-
-        disc_lip_const = np.divide(
-            batch_embedded_dists,
-            batch_original_dists,
-            out=np.full_like(batch_embedded_dists, np.nan),
-            where=batch_original_dists != 0,
-        )
-
-        zeta_ = np.nanmax(disc_lip_const, axis=1) / (
-            np.nanmin(disc_lip_const, axis=1) + 1e-12
-        )
-        zeta[points_to_reconsider] = zeta_
-        return zeta
- 
