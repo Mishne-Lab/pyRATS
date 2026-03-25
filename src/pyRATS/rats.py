@@ -670,7 +670,9 @@ class RATS:
         future_use_phi_of = np.arange(n, dtype=int)
 
         while len(param_changed) > 0:
-            reconsider_mask = np.isin(connectivity_matrix, param_changed) & (
+            changed_mask = np.zeros(n, dtype=bool)
+            changed_mask[param_changed] = True
+            reconsider_mask = changed_mask[connectivity_matrix] & (
                 connectivity_matrix != np.arange(n)[:, None]
             )
 

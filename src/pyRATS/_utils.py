@@ -16,6 +16,33 @@ from scipy.sparse.csgraph import (
     breadth_first_order,
 )
 
+import os
+
+def _get_available_memory():
+    """Returns the available memory in bytes.
+    
+    Checks for PYRATS_MEMORY_LIMIT environment variable, then tries to use psutil,
+    and finally falls back to a 4GB default.
+    """
+    # 1. Environment variable override
+    limit = os.environ.get("PYRATS_MEMORY_LIMIT")
+    if limit:
+        try:
+            return int(limit)
+        except ValueError:
+            pass
+            
+    # 2. Try psutil for dynamic discovery
+    try:
+        import psutil
+        # Use 75% of available RAM as a safe upper bound for our buffer
+        return int(psutil.virtual_memory().available * 0.75)
+    except (ImportError, AttributeError):
+        pass
+        
+    # 3. Fallback to 2GB
+    return 2 * 1024 * 1024 * 1024
+
 
 def lpca(X, d, U, n_jobs, verbose=False):
     """Fit PCA model on the data X.
@@ -1570,9 +1597,33 @@ class Param:
         masks = data_mask
 
         if self.algo == "lpca":
-            temp = np.matmul(
-                self.X[masks] - self.mu[ks][:, np.newaxis, :], self.Psi[ks]
-            )
+            # Dynamic chunking to prevent memory spikes on high-dimensional data
+            n_eval = len(ks)
+            n_neighbors = masks.shape[1]
+            n_features = self.X.shape[1]
+            
+            # Calculate chunk size based on available memory
+            memory_limit = _get_available_memory()
+            itemsize = self.X.dtype.itemsize
+            # Target buffer size per chunk: (chunk_size * n_neighbors * n_features * itemsize)
+            chunk_size = max(1, memory_limit // (n_neighbors * n_features * itemsize))
+            
+            if n_eval <= chunk_size:
+                # fits in memory, process all at once
+                temp = np.matmul(
+                    self.X[masks] - self.mu[ks][:, np.newaxis, :], self.Psi[ks]
+                )
+            else:
+                # split into chunks
+                temp = np.zeros((n_eval, n_neighbors, self.Psi.shape[2]))
+                for start in range(0, n_eval, chunk_size):
+                    end = min(start + chunk_size, n_eval)
+                    ks_chunk = ks[start:end]
+                    masks_chunk = masks[start:end]
+                    temp[start:end] = np.matmul(
+                        self.X[masks_chunk] - self.mu[ks_chunk][:, np.newaxis, :], 
+                        self.Psi[ks_chunk]
+                    )
             n = self.X.shape[0]
         else:
             temp = []
