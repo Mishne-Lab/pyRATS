@@ -12,8 +12,8 @@ if repo_root not in sys.path:
 from pyRATS import rats
 from examples import datasets
 
-def run_benchmark(n_samples, k=14, eta_min=5, cost_fn_name="distortion"):
-    sys.stderr.write(f"Running benchmark for n={n_samples}, k={k}, eta_min={eta_min}...\n")
+def run_benchmark(n_samples, n_neighbors=14, min_cluster_size=5, cost_function="distortion"):
+    sys.stderr.write(f"Running benchmark for n={n_samples}, n_neighbors={n_neighbors}, min_cluster_size={min_cluster_size}...\n")
     sys.stderr.flush()
     
     # Load dataset
@@ -21,11 +21,11 @@ def run_benchmark(n_samples, k=14, eta_min=5, cost_fn_name="distortion"):
     X, _, _ = ds.kleinbottle4d(n=n_samples)
     
     model = rats.RATS(
-        d=2,
-        k=k,
-        cost_fn_name=cost_fn_name,
-        eta_min=eta_min,
-        max_iter=3,
+        n_components=2,
+        n_neighbors=n_neighbors,
+        cost_function=cost_function,
+        min_cluster_size=min_cluster_size,
+        n_iter=3,
         nu=4,
         verbose=False, # Set to False for cleaner benchmark output
     )

@@ -75,69 +75,70 @@ class RATS:
 
     Parameters
     ----------
-    d : int
-       Intrinsic dimension of the manifold.
+    n_components : int, default=2
+        Intrinsic dimension of the manifold (target embedding dimension).
 
-    k : int
+    n_neighbors : int, default=28
         Neighborhood size for local view fitting.
 
-    to_postprocess : bool, default=True
+    postprocess : bool, default=True
         If True, searches for local embeddings that minimize the local distortion.
         Useful for noisy manifolds.
 
-    kpca_kernel : {None, 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default=None
+    kernel : {None, 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'} or Callable, default=None
         Kernel used for PCA. None uses standard linear PCA (lpca). Any other value
         uses sklearn.decomposition.KernelPCA. See
         https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.KernelPCA.html
         for more information.
 
-    cost_fn_name : {'alignment', 'distortion'}, default='alignment'
-        'alignment': Alignment error should be prefered when runtime matters or dealing with noisy manifolds.
+    cost_function : {'alignment', 'distortion'}, default='alignment'
+        'alignment': Alignment error should be preferred when runtime matters or dealing with noisy manifolds.
         'distortion': Distortion is slow, but works well on low noise manifolds.
 
-    eta_min : int, default=5
-        Minimum number of points per cluster. A cluster is formed by merging local embeddings that minimize cost_fn_name.
-        Larger clusters improve the runtime, and regularise noisy manifolds.
-        The value must be >= 1.
+    min_cluster_size : int, default=5
+        Minimum number of points per cluster. A cluster is formed by merging local
+        embeddings that minimise cost_function. Larger clusters improve runtime and
+        regularise noisy manifolds. The value must be >= 1.
 
-    eta_max : int, default=25
-        Maximum allowed size of the clusters.
-        The value must be > eta_min.
+    max_cluster_size : int, default=25
+        Maximum allowed size of the clusters. The value must be > min_cluster_size.
 
-    to_tear : bool, default=True
+    tear : bool, default=True
         Whether to tear the manifold.
 
     nu : int, default=3
         The ratio of the size of local views in the embedding against those in the data.
 
-    max_iter : int
-        Number of iterations to refine the global embedding.
-        In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
-        For every iteration in max_iter, the alignment of points in the embedding is recomputed and the tear is re-evaluated if to_tear=True.
+    n_iter : int, default=20
+        Number of outer iterations to refine the global embedding.
+        Riemannian gradient descent runs for n_iter * n_iter_inner total steps.
+        For every iteration the alignment of points in the embedding is recomputed
+        and the tear is re-evaluated if tear=True.
 
-    max_internal_iter : int
-        The number of internal iterations used by Riemannian Gradient Descent.
+    n_iter_inner : int, default=100
+        Number of internal iterations used by Riemannian Gradient Descent per outer step.
 
-    alpha : float
-        The step size used in the Riemannian gradient descent.
+    alpha : float, default=0.3
+        Step size used in the Riemannian gradient descent.
 
-    patience : int
-        The number of iterations to wait for error below tolerance
-        to persist before stopping the refinement.
+    n_iter_without_progress : int, default=5
+        The number of outer iterations to wait after the relative change in alignment
+        error and tear size both drop below *tol* before stopping early.
 
-    tol : float
-        The tolerance level for the relative change in the alignment error and the
+    tol : float, default=1e-2
+        Tolerance level for the relative change in the alignment error and the
         relative change in the size of the tear.
 
     metric : str, default='euclidean'
-        To be added in future releases. Metric assumed on the embedding. Currently only 'euclidean' is supported.
+        To be added in future releases. Metric assumed on the embedding.
+        Currently only 'euclidean' is supported.
 
-    kpca_fit_inverse_transform : bool, default=False
-        To be added in future releases. If True, computes the inverse of the embedding transformation.
-        This flag must be only be enabled when running RATS with using the kpca_kernel.
-        If running pca with kpca_kernel=None, kpca_fit_inverse_transform is always True.
+    fit_inverse_transform : bool, default=False
+        To be added in future releases. If True, computes the inverse of the embedding
+        transformation. Must only be enabled together with a non-None kernel.
+        When kernel=None (linear PCA) the inverse is always available.
 
-    verbose : bool
+    verbose : bool, default=False
         If True, print logs to stdout.
 
     n_jobs : int, default=-1
@@ -145,37 +146,114 @@ class RATS:
 
     """
 
+    # Mapping from deprecated parameter names to their new equivalents.
+    _DEPRECATED_PARAMS = {
+        "d": "n_components",
+        "k": "n_neighbors",
+        "max_iter": "n_iter",
+        "max_internal_iter": "n_iter_inner",
+        "patience": "n_iter_without_progress",
+        "cost_fn_name": "cost_function",
+        "eta_min": "min_cluster_size",
+        "eta_max": "max_cluster_size",
+        "kpca_kernel": "kernel",
+        "kpca_fit_inverse_transform": "fit_inverse_transform",
+        "to_postprocess": "postprocess",
+        "to_tear": "tear",
+    }
+
     def __init__(
         self,
-        d=2,
-        kpca_kernel=None,
-        kpca_fit_inverse_transform=False,
-        k=28,
-        cost_fn_name="alignment",
+        n_components=2,
+        kernel=None,
+        fit_inverse_transform=False,
+        n_neighbors=28,
+        cost_function="alignment",
         metric="euclidean",
-        to_postprocess=True,
-        eta_min=5,
-        eta_max=25,
-        to_tear=True,
+        postprocess=True,
+        min_cluster_size=5,
+        max_cluster_size=25,
+        tear=True,
         nu=3,
-        max_iter=20,
-        max_internal_iter=100,
+        n_iter=20,
+        n_iter_inner=100,
         alpha=0.3,
         eps=1e-8,
-        patience=5,
+        n_iter_without_progress=5,
         tol=1e-2,
         n_forced_clusters=1,
         verbose=False,
         n_jobs=-1,
+        **kwargs,
     ):
+        # ------------------------------------------------------------------
+        # Backward-compatibility: accept deprecated parameter names and emit
+        # a DeprecationWarning so old code keeps working for one release.
+        # ------------------------------------------------------------------
+        for old, new in self._DEPRECATED_PARAMS.items():
+            if old in kwargs:
+                warnings.warn(
+                    f"The parameter '{old}' is deprecated and will be removed in a "
+                    f"future release. Use '{new}' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                # Only override the new-name value if the caller did not also
+                # supply the new name explicitly.
+                locals_snapshot = {
+                    "n_components": n_components,
+                    "kernel": kernel,
+                    "fit_inverse_transform": fit_inverse_transform,
+                    "n_neighbors": n_neighbors,
+                    "cost_function": cost_function,
+                    "postprocess": postprocess,
+                    "min_cluster_size": min_cluster_size,
+                    "max_cluster_size": max_cluster_size,
+                    "tear": tear,
+                    "n_iter": n_iter,
+                    "n_iter_inner": n_iter_inner,
+                    "n_iter_without_progress": n_iter_without_progress,
+                }
+                if old == "d":
+                    n_components = kwargs.pop(old)
+                elif old == "k":
+                    n_neighbors = kwargs.pop(old)
+                elif old == "max_iter":
+                    n_iter = kwargs.pop(old)
+                elif old == "max_internal_iter":
+                    n_iter_inner = kwargs.pop(old)
+                elif old == "patience":
+                    n_iter_without_progress = kwargs.pop(old)
+                elif old == "cost_fn_name":
+                    cost_function = kwargs.pop(old)
+                elif old == "eta_min":
+                    min_cluster_size = kwargs.pop(old)
+                elif old == "eta_max":
+                    max_cluster_size = kwargs.pop(old)
+                elif old == "kpca_kernel":
+                    kernel = kwargs.pop(old)
+                elif old == "kpca_fit_inverse_transform":
+                    fit_inverse_transform = kwargs.pop(old)
+                elif old == "to_postprocess":
+                    postprocess = kwargs.pop(old)
+                elif old == "to_tear":
+                    tear = kwargs.pop(old)
+            else:
+                kwargs.pop(old, None)
 
-        if cost_fn_name not in ["alignment", "distortion"]:
-            raise ValueError(
-                f"cost_fn_name must be 'alignment' or 'distortion', got {cost_fn_name!r}."
+        if kwargs:
+            raise TypeError(
+                f"RATS.__init__() got unexpected keyword arguments: {list(kwargs.keys())}"
             )
-        if eta_max <= eta_min:
+
+        if cost_function not in ["alignment", "distortion"]:
             raise ValueError(
-                f"eta_max ({eta_max}) must be greater than eta_min ({eta_min})."
+                f"cost_function must be 'alignment' or 'distortion', got {cost_function!r}."
+            )
+        if max_cluster_size <= min_cluster_size:
+            raise ValueError(
+                f"max_cluster_size ({max_cluster_size}) must be greater than "
+                f"min_cluster_size ({min_cluster_size})."
             )
         if metric != "euclidean":
             warnings.warn(
@@ -185,9 +263,9 @@ class RATS:
                 FutureWarning,
                 stacklevel=2,
             )
-        if kpca_fit_inverse_transform:
+        if fit_inverse_transform:
             warnings.warn(
-                "kpca_fit_inverse_transform=True is not yet supported and will be "
+                "fit_inverse_transform=True is not yet supported and will be "
                 "ignored. Inverse transform support will be added in a future release.",
                 FutureWarning,
                 stacklevel=2,
@@ -196,22 +274,22 @@ class RATS:
         self.verbose = verbose
         self.n_jobs = n_jobs
 
-        self.d = d
-        self.kpca_kernel = kpca_kernel
-        self.kpca_fit_inverse_transform = kpca_fit_inverse_transform
-        self.k = k
-        if cost_fn_name == "distortion":
-            self.k_nn0 = max(k, eta_max * k)
+        self.d = n_components
+        self.kpca_kernel = kernel
+        self.kpca_fit_inverse_transform = fit_inverse_transform
+        self.k = n_neighbors
+        if cost_function == "distortion":
+            self.k_nn0 = max(n_neighbors, max_cluster_size * n_neighbors)
         else:
-            self.k_nn0 = k
-        self.cost_fn = cost_fn_name
-        self.to_postprocess = to_postprocess
-        self.eta_min, self.eta_max = eta_min, eta_max
-        self.to_tear = to_tear
+            self.k_nn0 = n_neighbors
+        self.cost_fn = cost_function
+        self.to_postprocess = postprocess
+        self.eta_min, self.eta_max = min_cluster_size, max_cluster_size
+        self.to_tear = tear
         self.nu = nu
-        self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
+        self.max_iter, self.max_internal_iter = n_iter, n_iter_inner
         self.alpha, self.eps = alpha, eps
-        self.patience, self.tol = patience, tol
+        self.patience, self.tol = n_iter_without_progress, tol
         self.metric = metric
         self.n_forced_clusters = n_forced_clusters
 

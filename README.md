@@ -33,7 +33,7 @@ import datasets, vis
 X, labels, _ = datasets.Datasets().kleinbottle4d(n=5000)
 
 # create a RATS object projecting the data to 2d while tearing the manifold
-model = rats.RATS(d=2, k=28, eta_min=5, to_tear=True)
+model = rats.RATS(n_components=2, n_neighbors=28, min_cluster_size=5, tear=True)
 y = model.fit_transform(X)
 
 # compute the gluing instructions along the tear

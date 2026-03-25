@@ -46,8 +46,8 @@ def load_dataset(name):
     return X, labels
 
 
-def run_model(k, eta_min, cost_fn_name, dataset_name, dirpath, force_compute=False):
-    fname = f"dataset={dataset_name}_k={k}_eta_min={eta_min}_cost-fn={cost_fn_name}.res"
+def run_model(n_neighbors, min_cluster_size, cost_function, dataset_name, dirpath, force_compute=False):
+    fname = f"dataset={dataset_name}_k={n_neighbors}_eta_min={min_cluster_size}_cost-fn={cost_function}.res"
     path = os.path.join(dirpath, fname)
     
     if os.path.exists(path) and not force_compute:
@@ -56,11 +56,11 @@ def run_model(k, eta_min, cost_fn_name, dataset_name, dirpath, force_compute=Fal
     X, _ = load_dataset(dataset_name)
 
     model = rats.RATS(
-        d=2,
-        k=k,
-        cost_fn_name=cost_fn_name,
-        eta_min=eta_min,
-        max_iter=3,
+        n_components=2,
+        n_neighbors=n_neighbors,
+        cost_function=cost_function,
+        min_cluster_size=min_cluster_size,
+        n_iter=3,
         nu=4,
         verbose=True,
     )
@@ -108,9 +108,9 @@ if __name__ == "__main__":
 
     if args.fast_mode:
         dataset_names = ["small_spherewithhole"]
-        ks = [14]
-        eta_mins = [5]
-        cost_fn_names = ["distortion"]
+        n_neighbors_list = [14]
+        min_cluster_sizes = [5]
+        cost_functions = ["distortion"]
     else:
         dataset_names = [
             "curvedtorus3d",
@@ -121,11 +121,11 @@ if __name__ == "__main__":
             "swissrollwithhole",
             "squarewithtwoholes",
         ]
-        ks = [14, 21]
-        eta_mins = [5, 10]
-        cost_fn_names = ["distortion", "alignment"]
+        n_neighbors_list = [14, 21]
+        min_cluster_sizes = [5, 10]
+        cost_functions = ["distortion", "alignment"]
 
-    argslist = list(itertools.product(ks, eta_mins, cost_fn_names, dataset_names))
+    argslist = list(itertools.product(n_neighbors_list, min_cluster_sizes, cost_functions, dataset_names))
 
     Parallel(n_jobs=1)(
         delayed(run_model)(*args, dirpath, force_compute) for args in argslist
