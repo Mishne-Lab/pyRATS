@@ -20,56 +20,7 @@ from pyRATS._utils import (
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 
-def _postprocess_col_range(
-    start,
-    end,
-    connectivity_matrix,
-    reconsider_mask,
-    param,
-    future_use_phi_of,
-    original_dists,
-    n,
-    n_jobs=1,
-):
-    """Process a contiguous range of neighbor-columns [start, end) for _postprocess.
-
-    Returns the element-wise minimum distortion and the corresponding column
-    index across the processed range, both as length-n arrays.
-    """
-    local_zeta_min = np.full(n, np.inf)
-    local_best_col = np.zeros(n, dtype=int)
-
-    for i in range(start, end):
-        col_mask = reconsider_mask[:, i]
-        use_phi_of = connectivity_matrix[:, i][col_mask]
-        if len(use_phi_of) == 0:
-            continue
-
-        neighbors_to_reconsider = connectivity_matrix[col_mask]
-        points_to_reconsider = np.where(col_mask)[0]
-
-        batch_embedded_datapoints = param.batched_eval_(
-            future_use_phi_of[use_phi_of], neighbors_to_reconsider, n_jobs=n_jobs
-        )
-        batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
-        batch_original_dists = original_dists[points_to_reconsider]
-
-        disc_lip_const = np.divide(
-            batch_embedded_dists,
-            batch_original_dists,
-            out=np.full_like(batch_embedded_dists, np.nan),
-            where=batch_original_dists != 0,
-        )
-        col_zeta = np.full(n, np.inf)
-        col_zeta[points_to_reconsider] = np.nanmax(disc_lip_const, axis=1) / (
-            np.nanmin(disc_lip_const, axis=1) + 1e-12
-        )
-
-        improved = col_zeta < local_zeta_min
-        local_best_col[improved] = i
-        local_zeta_min = np.minimum(local_zeta_min, col_zeta)
-
-    return local_zeta_min, local_best_col
+# _postprocess_col_range removed to reduce Parallel overhead in tight loops.
 
 
 class RATS:
@@ -691,39 +642,49 @@ class RATS:
                 & (connectivity_matrix != np.arange(n)[:, None])
             )
 
-            # Split the k columns into n_jobs chunks and process each chunk in
-            # a separate worker.  Each worker returns its local (zeta_min,
-            # best_col) for the columns it owns; we then do a final
-            # min-reduction here.  This mirrors the target_proc pattern used
-            # throughout _utils.py (lpca, best, …) while keeping memory
-            # bounded to one chunk of columns per worker at a time.
-            k_cols = connectivity_matrix.shape[1]
-            chunk_sz = max(1, k_cols // self.n_jobs)
-            ranges = [(p * chunk_sz, (p + 1) * chunk_sz) for p in range(self.n_jobs)]
-            ranges[-1] = (ranges[-1][0], k_cols)  # extend last chunk to cover remainder
-            ranges = [(s, e) for s, e in ranges if s < k_cols]  # drop empty ranges
-
-            results = Parallel(n_jobs=self.n_jobs)(
-                delayed(_postprocess_col_range)(
-                    s, e,
-                    connectivity_matrix,
-                    reconsider_mask,
-                    self.param,
-                    future_use_phi_of,
-                    original_dists,
-                    n,
-                    n_jobs=self.n_jobs,
-                )
-                for s, e in ranges
-            )
-
-            # Reduce chunk results into a single (zeta_min, best_col).
+            # Revert to serial loop for column checks.
+            # Local empirical tests show that Parallel overhead here outweighs the
+            # benefit for small k (neighbors), especially since this is called
+            # inside a convergence loop.
             zeta_min = np.full(n, np.inf)
             best_col = np.zeros(n, dtype=int)
-            for chunk_zeta_min, chunk_best_col in results:
-                improved = chunk_zeta_min < zeta_min
-                best_col[improved] = chunk_best_col[improved]
-                zeta_min = np.minimum(zeta_min, chunk_zeta_min)
+            
+            # Cache the number of jobs for batched_eval_ memory scaling
+            n_jobs = self.n_jobs if self.n_jobs > 0 else 1
+
+            for i in range(connectivity_matrix.shape[1]):
+                col_mask = reconsider_mask[:, i]
+                points_to_reconsider = np.where(col_mask)[0]
+                if len(points_to_reconsider) == 0:
+                    continue
+
+                use_phi_of = connectivity_matrix[points_to_reconsider, i]
+                neighbors_of_points = connectivity_matrix[points_to_reconsider]
+
+                # batched_eval_ now uses cached memory limits to reduce overhead
+                batch_embedded_datapoints = self.param.batched_eval_(
+                    future_use_phi_of[use_phi_of], 
+                    neighbors_of_points, 
+                    n_jobs=n_jobs
+                )
+                batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
+                batch_original_dists = original_dists[points_to_reconsider]
+
+                disc_lip_const = np.divide(
+                    batch_embedded_dists,
+                    batch_original_dists,
+                    out=np.full_like(batch_embedded_dists, np.nan),
+                    where=batch_original_dists != 0,
+                )
+                
+                col_zeta = np.nanmax(disc_lip_const, axis=1) / (
+                    np.nanmin(disc_lip_const, axis=1) + 1e-12
+                )
+
+                improved = col_zeta < zeta_min[points_to_reconsider]
+                improved_pts = points_to_reconsider[improved]
+                best_col[improved_pts] = i
+                zeta_min[improved_pts] = col_zeta[improved]
 
             param_changed = np.where(zeta > zeta_min)[0]
             future_use_phi_of[param_changed] = future_use_phi_of[

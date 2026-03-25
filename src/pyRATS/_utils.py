@@ -34,16 +34,16 @@ def _get_available_memory(n_jobs=1):
             pass
             
     # 2. Try psutil for dynamic discovery
-    try:
-        import psutil
-        # Use a fraction of available RAM as a safe upper bound for our buffer,
-        # divided by the number of parallel workers.
-        return int(psutil.virtual_memory().available * 0.75 / n_jobs)
-    except (ImportError, AttributeError):
-        pass
-        
-    # 3. Fallback to 4GB total (divided by workers)
-    return (4 * 1024 * 1024 * 1024) // n_jobs
+    # Cache the result to avoid repeated system calls in tight loops
+    if not hasattr(_get_available_memory, "_cached_val"):
+        try:
+            import psutil
+            # Use a fraction of available RAM as a safe upper bound for our buffer.
+            _get_available_memory._cached_val = int(psutil.virtual_memory().available * 0.75)
+        except (ImportError, AttributeError):
+            _get_available_memory._cached_val = 4 * 1024 * 1024 * 1024 # 4GB fallback
+
+    return _get_available_memory._cached_val // n_jobs
 
 
 def lpca(X, d, U, n_jobs, verbose=False):
@@ -125,12 +125,15 @@ def lpca(X, d, U, n_jobs, verbose=False):
         return start_ind, end_ind, Psi, mu, var_explained, n_pc_dir_chosen
 
     chunk_sz = int(n / n_jobs)
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(target_proc)(i, chunk_sz)
-        for i in tqdm(
-            range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+    if n_jobs == 1 or n < 1000: # Threshold for Parallel overhead
+        results = [target_proc(0, n)]
+    else:
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(target_proc)(i, chunk_sz)
+            for i in tqdm(
+                range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+            )
         )
-    )
 
     for i in range(len(results)):
         start_ind, end_ind, Psi_, mu_, var_explained_, n_pc_dir_chosen_ = results[i]
@@ -138,9 +141,6 @@ def lpca(X, d, U, n_jobs, verbose=False):
         param.mu[start_ind:end_ind, :] = mu_
         param.var_explained[start_ind:end_ind, :] = var_explained_
         param.n_pc_dir_chosen[start_ind:end_ind] = n_pc_dir_chosen_
-
-    if verbose:
-        tqdm.write("local_param: all %d points processed..." % n)
 
     return param
 
@@ -222,8 +222,6 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
     for start_ind, end_ind, model_ in results:
         local_param.model[start_ind:end_ind] = model_
 
-    if verbose:
-        tqdm.write("local_param: all %d points processed..." % n)
     return local_param
 
 
@@ -505,16 +503,29 @@ def cost_of_moving_distortion(
 
 
 def compute_zeta(d_e_mask0, Psi_k_mask):
-    if d_e_mask0.shape[0] == 1:
-        return 1
-    d_e_upper = triu(d_e_mask0, k=1)
-    row, col = d_e_upper.nonzero()
-    if len(row) == 0:
+    """Computes the local distortion zeta for a given parameterization and neighborhood distances.
+    
+    Parameters
+    ----------
+    d_e_mask0 : sparse matrix or array-like
+        Pairwise distances between neighbors in the original space.
+    Psi_k_mask : array-like
+        Embedded coordinates of the neighbors.
+    """
+    # For small k (typical in clustering), dense operations are MUCH faster than
+    # sparse triu/nonzero lookups.
+    d_e_mask = d_e_mask0.toarray() if hasattr(d_e_mask0, "toarray") else d_e_mask0
+    if d_e_mask.shape[0] <= 1:
         return 1
     
-    d_e_vals = d_e_upper.data
-    diff = Psi_k_mask[row] - Psi_k_mask[col]
-    dist_embedded = np.sqrt(np.sum(diff * diff, axis=1))
+    # Use squareform/pdist for efficient pair extraction on small dense matrices
+    d_e_mask_ = squareform(d_e_mask)
+    mask = d_e_mask_ != 0
+    if not np.any(mask):
+        return 1
+    
+    d_e_vals = d_e_mask_[mask]
+    dist_embedded = pdist(Psi_k_mask)[mask]
     
     disc_lip_const = dist_embedded / d_e_vals
     return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
@@ -716,16 +727,19 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             return start_ind, end_ind, cost_, dest_
 
         chunk_sz = int(n / n_jobs)
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
-            for p_num in tqdm(
-                range(n_jobs),
-                desc=f"eta={eta}",
-                unit="chunk",
-                leave=False,
-                disable=not verbose,
+        if n_jobs == 1 or n < 1000:
+            results = [target_proc(0, n, n, Utilde, n_C, c)]
+        else:
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
+                for p_num in tqdm(
+                    range(n_jobs),
+                    desc=f"eta={eta}",
+                    unit="chunk",
+                    leave=False,
+                    disable=not verbose,
+                )
             )
-        )
         for start_ind, end_ind, cost_, dest_ in results:
             cost[start_ind:end_ind] = cost_
             dest[start_ind:end_ind] = dest_
@@ -879,9 +893,12 @@ def compute_seq_of_views(
             overlap_svals_[i - start_ind, :] = svdvals_
         return (start_ind, end_ind, overlap_svals_)
 
-    res = Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
-        delayed(target_proc)(p_num) for p_num in range(n_jobs)
-    )
+    if n_jobs == 1 or n_elem < 1000:
+        res = [target_proc(p_num) for p_num in range(n_jobs)]
+    else:
+        res = Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
+            delayed(target_proc)(p_num) for p_num in range(n_jobs)
+        )
     for value in res:
         start_ind, end_ind, overlap_svals_ = value
         overlap_svals[start_ind:end_ind, :] = overlap_svals_
