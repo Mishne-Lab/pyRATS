@@ -62,11 +62,11 @@ python -m http.server 8000
 and opening http://localhost:8000 in your browser.
 
 # Memory Management
-`pyRATS` implements dynamic chunking to prevent memory spikes on large or high-dimensional datasets. By default, it uses up to 75% of available system RAM. If you need to explicitly limit memory usage, set the `PYRATS_MEMORY_LIMIT` environment variable (in bytes):
+`pyRATS` implements dynamic chunking to prevent memory spikes on large or high-dimensional datasets. By default, it attempts to use up to 75% of available system RAM. This measurement can fail and defaults to 4GB otherwise. If you need to explicitly set memory usage, set the `PYRATS_MEMORY_LIMIT` environment variable (in bytes):
 
 ```bash
-# Limit pyRATS to 4GB
-export PYRATS_MEMORY_LIMIT=4294967296
+# Set pyRATS memory usage to 40GB
+export PYRATS_MEMORY_LIMIT=42949672960
 python your_script.py
 ```
 

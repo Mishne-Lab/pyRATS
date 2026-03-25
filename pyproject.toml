@@ -19,6 +19,7 @@ dependencies = [
     "scipy",
     "joblib",
     "multiprocess",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
