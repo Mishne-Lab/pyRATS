@@ -94,6 +94,19 @@ def _get_available_memory(n_jobs=1):
     return _available_memory_bytes() // max(1, n_jobs)
 
 
+def _inner_blas_threads(n_jobs):
+    """BLAS threads per outer Parallel worker, sized to avoid oversubscription.
+
+    Apple Accelerate / OpenBLAS otherwise spawn a pool sized to all cores
+    inside each outer worker, giving n_jobs * cpu_count software threads on
+    cpu_count hardware threads — the n_jobs ~ cpu_count/2 cliff. Pinning to 1
+    fixes that but leaves cores idle when n_jobs < cpu_count. cpu_count //
+    n_jobs strikes the balance: full utilization, no contention. Floored at 1.
+    """
+    cores = os.cpu_count() or 1
+    return max(1, cores // max(1, n_jobs))
+
+
 def lpca(X, d, U, n_jobs, verbose=False):
     """Fit PCA model on the data X.
 
@@ -176,11 +189,7 @@ def lpca(X, d, U, n_jobs, verbose=False):
     if n_jobs == 1 or n < 1000: # Threshold for Parallel overhead
         results = [target_proc(0, n)]
     else:
-        # inner_max_num_threads=1: each loky worker would otherwise fork its
-        # own BLAS pool sized to all cores, causing n_jobs**2 thread contention
-        # which produces a slowdown past n_jobs ~ ncores/2. Capping the inner
-        # pool to 1 keeps scaling monotonic.
-        with parallel_backend("loky", inner_max_num_threads=1):
+        with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
             results = Parallel(n_jobs=n_jobs)(
                 delayed(target_proc)(i, chunk_sz)
                 for i in tqdm(
@@ -265,7 +274,7 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
         return start_ind, end_ind, model_
 
     chunk_sz = int(n / n_jobs)
-    with parallel_backend("loky", inner_max_num_threads=1):
+    with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
         results = Parallel(n_jobs=n_jobs)(
             delayed(target_proc)(p_num, chunk_sz)
             for p_num in tqdm(
@@ -784,13 +793,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         if n_jobs == 1 or n < 1000:
             results = [target_proc(0, n, n, Utilde, n_C, c)]
         else:
-            # inner_max_num_threads=1: each loky worker would otherwise fork its
-            # own BLAS pool. With Apple Accelerate / OpenBLAS sized to all cores,
-            # n_jobs workers x n_cores BLAS threads = n_jobs**2 software threads
-            # contending for n_cores hardware threads, which produces the
-            # 4 -> 8 jobs slowdown. Capping the inner pool to 1 keeps scaling
-            # monotonic.
-            with parallel_backend("loky", inner_max_num_threads=1):
+            with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
                 results = Parallel(n_jobs=n_jobs)(
                     delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
                     for p_num in tqdm(
@@ -957,7 +960,7 @@ def compute_seq_of_views(
     if n_jobs == 1 or n_elem < 1000:
         res = [target_proc(p_num) for p_num in range(n_jobs)]
     else:
-        with parallel_backend("loky", inner_max_num_threads=1):
+        with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
             res = list(Parallel(n_jobs=n_jobs,
                                 return_as="generator_unordered")(
                 delayed(target_proc)(p_num) for p_num in range(n_jobs)
