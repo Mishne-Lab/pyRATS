@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 import os
 import sys
+import time
 import warnings
 
 _MIN_MEMORY_FLOOR = 64 * 1024 * 1024  # 64 MB — always make some progress
@@ -56,8 +57,12 @@ def _cgroup_available_bytes():
     return None
 
 
+_MEMORY_CACHE_TTL = 0.25  # seconds — fresh enough to track fit-phase allocations
+_memory_cache: tuple[float, int] | None = None  # (timestamp, bytes)
+
+
 def _available_memory_bytes():
-    """Live probe of usable memory in bytes.
+    """Live probe of usable memory in bytes, cached with a short TTL.
 
     Sources, all combined via min():
       * psutil.virtual_memory().available scaled by 0.75 (or 4GB fallback)
@@ -65,10 +70,17 @@ def _available_memory_bytes():
         before psutil sees pressure)
       * PYRATS_MEMORY_LIMIT env var as a hard cap
 
+    Result is cached for _MEMORY_CACHE_TTL seconds (default 250ms). This
+    eliminates psutil and cgroup file-read overhead on hot call sites (e.g.
+    iter_eval_ inside best()'s per-point loop) while still reacting to
+    large allocations between fit phases — the original "cache forever" bug.
     Floored at 64MB so chunking can always make at least one row of progress.
-    Called per request; do not cache — pyRATS allocates large internal state
-    during a fit, and a stale snapshot is the root cause of the prior OOMs.
     """
+    global _memory_cache
+    now = time.monotonic()
+    if _memory_cache is not None and now - _memory_cache[0] < _MEMORY_CACHE_TTL:
+        return _memory_cache[1]
+
     try:
         import psutil
         avail = int(psutil.virtual_memory().available * 0.75)
@@ -86,7 +98,9 @@ def _available_memory_bytes():
         except ValueError:
             pass
 
-    return max(avail, _MIN_MEMORY_FLOOR)
+    result = max(avail, _MIN_MEMORY_FLOOR)
+    _memory_cache = (now, result)
+    return result
 
 
 # Backward-compatible alias for any external caller pinned to the old name.
@@ -1795,10 +1809,18 @@ class Param:
             d = self.Psi.shape[2] if self.algo == "lpca" else 0
             return np.zeros((0, masks.shape[1] if hasattr(masks, "shape") else 0, d))
 
-        out = None
-        for sl, chunk in self.iter_eval_(ks, masks):
-            if out is None:
-                out = np.empty((n_eval, chunk.shape[1], chunk.shape[2]), dtype=chunk.dtype)
+        it = self.iter_eval_(ks, masks)
+        first_sl, first_chunk = next(it)
+        if first_sl.stop == n_eval:
+            # Common path: everything fit in one chunk — return directly,
+            # no extra allocation or copy.
+            return first_chunk
+
+        # Multi-chunk path: accumulate into a pre-allocated output array.
+        out = np.empty((n_eval, first_chunk.shape[1], first_chunk.shape[2]),
+                       dtype=first_chunk.dtype)
+        out[first_sl] = first_chunk
+        for sl, chunk in it:
             out[sl] = chunk
         return out
 
