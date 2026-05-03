@@ -252,6 +252,17 @@ class RATS:
         if n_jobs == -1:
             self.n_jobs = cpu_count()
 
+        cores = cpu_count()
+        if self.n_jobs > cores:
+            warnings.warn(
+                f"n_jobs={self.n_jobs} exceeds the number of available CPU cores "
+                f"({cores}). This causes oversubscription and will slow down the "
+                f"computation. n_jobs has been clamped to {cores}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self.n_jobs = cores
+
     def fit_transform(self, X):
         """Fit the model on the data in X, and transform X.
 
