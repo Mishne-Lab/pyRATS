@@ -3,7 +3,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, laplacian
 import scipy
 
-from joblib import delayed, Parallel
+from joblib import delayed, Parallel, parallel_backend
 from tqdm import tqdm
 
 from pyRATS import _utils
@@ -262,10 +262,13 @@ def compute_points_across_tear_graph(
     else:
         ij_pairs_batches = [(views_across_tear_graph_row, views_across_tear_graph_col)]
 
-    # Run in parallel
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(process_pairs)(ij_pairs) for ij_pairs in ij_pairs_batches
-    )
+    # Run in parallel; cap inner BLAS threads so each loky worker doesn't
+    # spawn its own multi-threaded BLAS pool, which would cause n_jobs**2
+    # thread oversubscription against ncores hardware threads.
+    with parallel_backend("loky", inner_max_num_threads=1):
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(process_pairs)(ij_pairs) for ij_pairs in ij_pairs_batches
+        )
 
     # Aggregate results
     tear_graph_row_inds = np.concatenate([r for r, _, _ in results if len(r)])

@@ -609,19 +609,26 @@ class RATS:
             self.neighborhood_graph_sym[row_idx, col_idx]
         ).reshape(n, num_pairs)
 
-        embedded_datapoints = self.param.batched_eval_(
-            range(n), self.U.indices.reshape(n, self.k)
-        )  # tested and they are equivalent
-        embedded_dists = batched_pdist(embedded_datapoints)
-        disc_lip_const = np.divide(
-            embedded_dists,
-            original_dists,
-            out=np.full_like(embedded_dists, np.nan),
-            where=original_dists != 0,
-        )
-        zeta = np.nanmax(disc_lip_const, axis=1) / (
-            np.nanmin(disc_lip_const, axis=1) + 1e-12
-        )
+        # Per-row peak for the downstream batched_pdist: a (chunk, num_pairs, d)
+        # diff buffer plus its (chunk, num_pairs) result. Folded into the
+        # iter_eval_ chunk-size budget so the whole pipeline stays bounded.
+        d_embed = self.param.Psi.shape[2] if self.param.algo == "lpca" else self.d
+        itemsize = self.param.X.dtype.itemsize
+        pdist_per_row = num_pairs * (d_embed + 1) * itemsize
+
+        zeta = np.empty(n)
+        view_idx = np.arange(n, dtype=int)
+        masks_init = self.U.indices.reshape(n, self.k)
+        for sl, chunk in self.param.iter_eval_(view_idx, masks_init,
+                                               peak_bytes_per_row=pdist_per_row):
+            chunk_dists = batched_pdist(chunk)
+            chunk_orig = original_dists[sl]
+            dlc = np.divide(
+                chunk_dists, chunk_orig,
+                out=np.full_like(chunk_dists, np.nan),
+                where=chunk_orig != 0,
+            )
+            zeta[sl] = np.nanmax(dlc, axis=1) / (np.nanmin(dlc, axis=1) + 1e-12)
 
         self.param.zeta = zeta
 
@@ -642,15 +649,8 @@ class RATS:
                 & (connectivity_matrix != np.arange(n)[:, None])
             )
 
-            # Revert to serial loop for column checks.
-            # Local empirical tests show that Parallel overhead here outweighs the
-            # benefit for small k (neighbors), especially since this is called
-            # inside a convergence loop.
             zeta_min = np.full(n, np.inf)
             best_col = np.zeros(n, dtype=int)
-            
-            # Cache the number of jobs for batched_eval_ memory scaling
-            n_jobs = self.n_jobs if self.n_jobs > 0 else 1
 
             for i in range(connectivity_matrix.shape[1]):
                 col_mask = reconsider_mask[:, i]
@@ -660,26 +660,24 @@ class RATS:
 
                 use_phi_of = connectivity_matrix[points_to_reconsider, i]
                 neighbors_of_points = connectivity_matrix[points_to_reconsider]
-
-                # batched_eval_ now uses cached memory limits to reduce overhead
-                batch_embedded_datapoints = self.param.batched_eval_(
-                    future_use_phi_of[use_phi_of], 
-                    neighbors_of_points, 
-                    n_jobs=n_jobs
-                )
-                batch_embedded_dists = batched_pdist(batch_embedded_datapoints)
                 batch_original_dists = original_dists[points_to_reconsider]
 
-                disc_lip_const = np.divide(
-                    batch_embedded_dists,
-                    batch_original_dists,
-                    out=np.full_like(batch_embedded_dists, np.nan),
-                    where=batch_original_dists != 0,
-                )
-                
-                col_zeta = np.nanmax(disc_lip_const, axis=1) / (
-                    np.nanmin(disc_lip_const, axis=1) + 1e-12
-                )
+                col_zeta = np.empty(len(points_to_reconsider))
+                for sl, chunk in self.param.iter_eval_(
+                    future_use_phi_of[use_phi_of],
+                    neighbors_of_points,
+                    peak_bytes_per_row=pdist_per_row,
+                ):
+                    chunk_dists = batched_pdist(chunk)
+                    chunk_orig = batch_original_dists[sl]
+                    dlc = np.divide(
+                        chunk_dists, chunk_orig,
+                        out=np.full_like(chunk_dists, np.nan),
+                        where=chunk_orig != 0,
+                    )
+                    col_zeta[sl] = np.nanmax(dlc, axis=1) / (
+                        np.nanmin(dlc, axis=1) + 1e-12
+                    )
 
                 improved = col_zeta < zeta_min[points_to_reconsider]
                 improved_pts = points_to_reconsider[improved]

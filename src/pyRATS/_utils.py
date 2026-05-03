@@ -18,35 +18,80 @@ from scipy.sparse.csgraph import (
 from tqdm import tqdm
 
 import os
+import sys
+import warnings
 
-def _get_available_memory(n_jobs=1):
-    """Returns the per-worker memory budget in bytes.
+_MIN_MEMORY_FLOOR = 64 * 1024 * 1024  # 64 MB — always make some progress
+_FALLBACK_MEMORY = 4 * 1024 * 1024 * 1024  # 4 GB if psutil is missing
 
-    Used by chunking code paths to size buffers safely. When the caller is
-    running inside ``n_jobs`` concurrent workers each holding their own
-    buffers, pass ``n_jobs`` so the budget is divided accordingly. When
-    called from a serial code path, leave ``n_jobs=1``.
 
-    Sources, in priority order:
-      1. PYRATS_MEMORY_LIMIT environment variable (total available bytes)
-      2. psutil's available system RAM, scaled by 0.75
-      3. 4GB fallback
+def _cgroup_available_bytes():
+    """Linux-only: bytes still available inside the current cgroup, or None.
+
+    Reads cgroup v2 first, then falls back to v1. Returns None on any other
+    OS, when no limit is set, or when the files can't be parsed.
     """
-    limit = os.environ.get("PYRATS_MEMORY_LIMIT")
-    if limit:
+    if not sys.platform.startswith("linux"):
+        return None
+    pairs = (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
+         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    )
+    for max_path, cur_path in pairs:
         try:
-            return int(limit) // max(1, n_jobs)
+            with open(max_path) as f:
+                raw = f.read().strip()
+            if not raw or raw == "max":
+                return None
+            limit = int(raw)
+            # cgroup v1 uses a huge sentinel when unconstrained.
+            if limit >= (1 << 62):
+                return None
+            with open(cur_path) as f:
+                used = int(f.read().strip())
+            return max(0, limit - used)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _available_memory_bytes():
+    """Live probe of usable memory in bytes.
+
+    Sources, all combined via min():
+      * psutil.virtual_memory().available scaled by 0.75 (or 4GB fallback)
+      * cgroup v2/v1 remaining quota on Linux containers (avoids OOM-kill
+        before psutil sees pressure)
+      * PYRATS_MEMORY_LIMIT env var as a hard cap
+
+    Floored at 64MB so chunking can always make at least one row of progress.
+    Called per request; do not cache — pyRATS allocates large internal state
+    during a fit, and a stale snapshot is the root cause of the prior OOMs.
+    """
+    try:
+        import psutil
+        avail = int(psutil.virtual_memory().available * 0.75)
+    except (ImportError, AttributeError):
+        avail = _FALLBACK_MEMORY
+
+    cgroup = _cgroup_available_bytes()
+    if cgroup is not None:
+        avail = min(avail, int(cgroup * 0.75))
+
+    user_cap = os.environ.get("PYRATS_MEMORY_LIMIT")
+    if user_cap:
+        try:
+            avail = min(avail, int(user_cap))
         except ValueError:
             pass
 
-    if not hasattr(_get_available_memory, "_cached_val"):
-        try:
-            import psutil
-            _get_available_memory._cached_val = int(psutil.virtual_memory().available * 0.75)
-        except (ImportError, AttributeError):
-            _get_available_memory._cached_val = 4 * 1024 * 1024 * 1024
+    return max(avail, _MIN_MEMORY_FLOOR)
 
-    return _get_available_memory._cached_val // max(1, n_jobs)
+
+# Backward-compatible alias for any external caller pinned to the old name.
+def _get_available_memory(n_jobs=1):
+    return _available_memory_bytes() // max(1, n_jobs)
 
 
 def lpca(X, d, U, n_jobs, verbose=False):
@@ -1622,74 +1667,104 @@ class Param:
         self.add_dim = False
         self.standardize = False
 
-    def batched_eval_(self, view_index, data_mask, n_jobs=1):
-        """Maps multiple points to the new space through their local (K-)PCA prameterizations.
+    def iter_eval_(self, view_index, data_mask, peak_bytes_per_row=0):
+        """Stream the local-(K-)PCA embedding in memory-bounded chunks.
+
+        Yields ``(slice, chunk)`` pairs where ``chunk`` is the embedded
+        sub-array for ``view_index[slice]`` / ``data_mask[slice]``. Lets
+        callers reduce per chunk (e.g. compute pdists, take a max) without
+        ever materializing the full ``(n_eval, k, d)`` output.
 
         Parameters
         ------
-        view_index : array-like, shape (n_points)
-            The indices of the parameterization to use.
-
+        view_index : array-like, shape (n_points,)
         data_mask : array-like, shape (n_points, n_neighbors)
-            List of points to map to the embedding dimension for each point in 'view_index'
+        peak_bytes_per_row : int, default=0
+            Caller-provided estimate of additional bytes the downstream
+            pipeline will allocate per row (e.g. batched_pdist's diff
+            buffer). Folded into the chunk-size budget so the *whole*
+            pipeline stays within available memory, not just this method.
 
-        n_jobs : int, default=1
-            Number of concurrent workers calling this method. Used only to
-            divide the chunking memory budget so each worker stays within
-            its safe share of available RAM. Pass 1 from serial code paths.
+        On MemoryError the chunk size is halved and the slice is retried;
+        a one-time RuntimeWarning is emitted so the user knows they're at
+        the limit.
         """
-
-        ks = view_index
+        ks = np.asarray(view_index) if not isinstance(view_index, np.ndarray) else view_index
         masks = data_mask
+        n_eval = len(ks)
+        if n_eval == 0:
+            return
 
         if self.algo == "lpca":
-            # Dynamic chunking to prevent memory spikes on high-dimensional data
-            n_eval = len(ks)
             n_neighbors = masks.shape[1]
             n_features = self.X.shape[1]
-
-            memory_limit = _get_available_memory(n_jobs=n_jobs)
+            d = self.Psi.shape[2]
             itemsize = self.X.dtype.itemsize
-            # Target buffer size per chunk: (chunk_size * n_neighbors * n_features * itemsize)
-            chunk_size = max(1, memory_limit // (n_neighbors * n_features * itemsize))
-            
-            if n_eval <= chunk_size:
-                # fits in memory, process all at once
-                temp = np.matmul(
-                    self.X[masks] - self.mu[ks][:, np.newaxis, :], self.Psi[ks]
-                )
-            else:
-                # split into chunks
-                temp = np.zeros((n_eval, n_neighbors, self.Psi.shape[2]))
-                for start in range(0, n_eval, chunk_size):
-                    end = min(start + chunk_size, n_eval)
-                    ks_chunk = ks[start:end]
-                    masks_chunk = masks[start:end]
-                    temp[start:end] = np.matmul(
-                        self.X[masks_chunk] - self.mu[ks_chunk][:, np.newaxis, :], 
-                        self.Psi[ks_chunk]
+            # Per-row peak inside this method: input gather + output buffer.
+            own_per_row = (n_neighbors * n_features + n_neighbors * d) * itemsize
+            per_row = max(1, own_per_row + max(0, int(peak_bytes_per_row)))
+
+            chunk_size = max(1, _available_memory_bytes() // per_row)
+            chunk_size = min(chunk_size, n_eval)
+
+            warned = False
+            start = 0
+            while start < n_eval:
+                end = min(start + chunk_size, n_eval)
+                sl = slice(start, end)
+                ks_chunk = ks[sl]
+                masks_chunk = masks[sl]
+                try:
+                    chunk = np.matmul(
+                        self.X[masks_chunk] - self.mu[ks_chunk][:, np.newaxis, :],
+                        self.Psi[ks_chunk],
                     )
-            n = self.X.shape[0]
+                except MemoryError:
+                    if chunk_size <= 1:
+                        raise
+                    chunk_size = max(1, chunk_size // 2)
+                    if not warned:
+                        warnings.warn(
+                            "pyRATS: hit MemoryError during local embedding; "
+                            f"halving chunk size to {chunk_size} and retrying. "
+                            "Consider lowering n_neighbors or setting "
+                            "PYRATS_MEMORY_LIMIT.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        warned = True
+                    continue
+                chunk = self._apply_post_(ks_chunk, masks_chunk, chunk)
+                yield sl, chunk
+                start = end
         else:
-            temp = []
+            # KPCA path is already row-by-row; yield singletons so callers
+            # have a uniform streaming interface.
             for i, k in enumerate(ks):
                 X_ = self.X[masks[i], :]
                 if self.standardize:
                     X_ = X_ - np.mean(X_, axis=0)[None, :]
                     X_ = X_ / (np.std(X_, axis=0, ddof=1)[None, :] + 1e-12)
-                temp.append(self.model[k].transform(X_))
-            temp = np.array(temp)
+                chunk = self.model[k].transform(X_)[None, ...]
+                ks_chunk = ks[i:i + 1]
+                masks_chunk = masks[i:i + 1]
+                chunk = self._apply_post_(ks_chunk, masks_chunk, chunk)
+                yield slice(i, i + 1), chunk
 
+    def _apply_post_(self, ks, masks, temp):
+        """Apply noise / add_dim / b / T / v to a chunk of embedded points.
+
+        Factored out of batched_eval_ so iter_eval_ can apply the same
+        post-processing per chunk. Semantics match the original inline code.
+        """
         if self.noise_var:
             np.random.seed(self.noise_seed[0])
-            temp2 = np.random.normal(0, self.noise_var, (n, temp.shape[2]))
+            temp2 = np.random.normal(0, self.noise_var, (self.X.shape[0], temp.shape[2]))
             temp = temp + temp2[masks, :]
         if self.noise is not None:
             temp = temp + self.noise[masks]
-
         if self.add_dim:
             temp = np.concatenate([temp, np.zeros((*temp.shape[:2], 1))], axis=2)
-
         if self.b is not None:
             temp = temp * self.b[ks][:, None, None]
             if self.T is not None:
@@ -1697,6 +1772,32 @@ class Param:
             if self.v is not None:
                 temp = temp + self.v[[ks], :]
         return temp
+
+    def batched_eval_(self, view_index, data_mask, n_jobs=1):
+        """Materialize the full local-(K-)PCA embedding.
+
+        Thin wrapper around iter_eval_ for callers that need the whole
+        ``(n_eval, n_neighbors, d)`` array (e.g. clustering's procrustes
+        cost). Memory-bounded internally via iter_eval_'s chunking and
+        MemoryError backoff.
+
+        ``n_jobs`` is accepted for backward compatibility and ignored;
+        the live memory probe in iter_eval_ already reflects whatever
+        sibling workers have allocated.
+        """
+        ks = view_index
+        masks = data_mask
+        n_eval = len(ks)
+        if n_eval == 0:
+            d = self.Psi.shape[2] if self.algo == "lpca" else 0
+            return np.zeros((0, masks.shape[1] if hasattr(masks, "shape") else 0, d))
+
+        out = None
+        for sl, chunk in self.iter_eval_(ks, masks):
+            if out is None:
+                out = np.empty((n_eval, chunk.shape[1], chunk.shape[2]), dtype=chunk.dtype)
+            out[sl] = chunk
+        return out
 
     def eval_(self, view_index, data_mask, apply_b=True):
         """Maps points to the new space through their local (K-)PCA prameterizations.
