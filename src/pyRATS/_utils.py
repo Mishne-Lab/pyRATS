@@ -6,7 +6,7 @@ from sklearn.decomposition import KernelPCA
 from scipy.sparse import csr_matrix, triu, block_diag, diags
 import itertools
 
-from joblib import delayed, Parallel
+from joblib import delayed, Parallel, parallel_backend
 
 from scipy.spatial.distance import pdist, squareform
 from sklearn.utils.extmath import svd_flip
@@ -20,30 +20,33 @@ from tqdm import tqdm
 import os
 
 def _get_available_memory(n_jobs=1):
-    """Returns the available memory in bytes, scaled by n_jobs.
-    
-    Checks for PYRATS_MEMORY_LIMIT environment variable, then tries to use psutil,
-    and finally falls back to a 4GB default (divided by n_jobs).
+    """Returns the per-worker memory budget in bytes.
+
+    Used by chunking code paths to size buffers safely. When the caller is
+    running inside ``n_jobs`` concurrent workers each holding their own
+    buffers, pass ``n_jobs`` so the budget is divided accordingly. When
+    called from a serial code path, leave ``n_jobs=1``.
+
+    Sources, in priority order:
+      1. PYRATS_MEMORY_LIMIT environment variable (total available bytes)
+      2. psutil's available system RAM, scaled by 0.75
+      3. 4GB fallback
     """
-    # 1. Environment variable override
     limit = os.environ.get("PYRATS_MEMORY_LIMIT")
     if limit:
         try:
-            return int(limit)
+            return int(limit) // max(1, n_jobs)
         except ValueError:
             pass
-            
-    # 2. Try psutil for dynamic discovery
-    # Cache the result to avoid repeated system calls in tight loops
+
     if not hasattr(_get_available_memory, "_cached_val"):
         try:
             import psutil
-            # Use a fraction of available RAM as a safe upper bound for our buffer.
             _get_available_memory._cached_val = int(psutil.virtual_memory().available * 0.75)
         except (ImportError, AttributeError):
-            _get_available_memory._cached_val = 4 * 1024 * 1024 * 1024 # 4GB fallback
+            _get_available_memory._cached_val = 4 * 1024 * 1024 * 1024
 
-    return _get_available_memory._cached_val // n_jobs
+    return _get_available_memory._cached_val // max(1, n_jobs)
 
 
 def lpca(X, d, U, n_jobs, verbose=False):
@@ -128,12 +131,17 @@ def lpca(X, d, U, n_jobs, verbose=False):
     if n_jobs == 1 or n < 1000: # Threshold for Parallel overhead
         results = [target_proc(0, n)]
     else:
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(target_proc)(i, chunk_sz)
-            for i in tqdm(
-                range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+        # inner_max_num_threads=1: each loky worker would otherwise fork its
+        # own BLAS pool sized to all cores, causing n_jobs**2 thread contention
+        # which produces a slowdown past n_jobs ~ ncores/2. Capping the inner
+        # pool to 1 keeps scaling monotonic.
+        with parallel_backend("loky", inner_max_num_threads=1):
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(target_proc)(i, chunk_sz)
+                for i in tqdm(
+                    range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+                )
             )
-        )
 
     for i in range(len(results)):
         start_ind, end_ind, Psi_, mu_, var_explained_, n_pc_dir_chosen_ = results[i]
@@ -212,12 +220,13 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
         return start_ind, end_ind, model_
 
     chunk_sz = int(n / n_jobs)
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(target_proc)(p_num, chunk_sz)
-        for p_num in tqdm(
-            range(n_jobs), desc="KPCA", unit="chunk", leave=False, disable=not verbose
+    with parallel_backend("loky", inner_max_num_threads=1):
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(target_proc)(p_num, chunk_sz)
+            for p_num in tqdm(
+                range(n_jobs), desc="KPCA", unit="chunk", leave=False, disable=not verbose
+            )
         )
-    )
 
     for start_ind, end_ind, model_ in results:
         local_param.model[start_ind:end_ind] = model_
@@ -730,16 +739,23 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         if n_jobs == 1 or n < 1000:
             results = [target_proc(0, n, n, Utilde, n_C, c)]
         else:
-            results = Parallel(n_jobs=n_jobs)(
-                delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
-                for p_num in tqdm(
-                    range(n_jobs),
-                    desc=f"eta={eta}",
-                    unit="chunk",
-                    leave=False,
-                    disable=not verbose,
+            # inner_max_num_threads=1: each loky worker would otherwise fork its
+            # own BLAS pool. With Apple Accelerate / OpenBLAS sized to all cores,
+            # n_jobs workers x n_cores BLAS threads = n_jobs**2 software threads
+            # contending for n_cores hardware threads, which produces the
+            # 4 -> 8 jobs slowdown. Capping the inner pool to 1 keeps scaling
+            # monotonic.
+            with parallel_backend("loky", inner_max_num_threads=1):
+                results = Parallel(n_jobs=n_jobs)(
+                    delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
+                    for p_num in tqdm(
+                        range(n_jobs),
+                        desc=f"eta={eta}",
+                        unit="chunk",
+                        leave=False,
+                        disable=not verbose,
+                    )
                 )
-            )
         for start_ind, end_ind, cost_, dest_ in results:
             cost[start_ind:end_ind] = cost_
             dest[start_ind:end_ind] = dest_
@@ -896,9 +912,11 @@ def compute_seq_of_views(
     if n_jobs == 1 or n_elem < 1000:
         res = [target_proc(p_num) for p_num in range(n_jobs)]
     else:
-        res = Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
-            delayed(target_proc)(p_num) for p_num in range(n_jobs)
-        )
+        with parallel_backend("loky", inner_max_num_threads=1):
+            res = list(Parallel(n_jobs=n_jobs,
+                                return_as="generator_unordered")(
+                delayed(target_proc)(p_num) for p_num in range(n_jobs)
+            ))
     for value in res:
         start_ind, end_ind, overlap_svals_ = value
         overlap_svals[start_ind:end_ind, :] = overlap_svals_
@@ -1616,7 +1634,9 @@ class Param:
             List of points to map to the embedding dimension for each point in 'view_index'
 
         n_jobs : int, default=1
-            Number of parallel jobs. Used to scale memory limits.
+            Number of concurrent workers calling this method. Used only to
+            divide the chunking memory budget so each worker stays within
+            its safe share of available RAM. Pass 1 from serial code paths.
         """
 
         ks = view_index
@@ -1627,8 +1647,7 @@ class Param:
             n_eval = len(ks)
             n_neighbors = masks.shape[1]
             n_features = self.X.shape[1]
-            
-            # Calculate chunk size based on available memory
+
             memory_limit = _get_available_memory(n_jobs=n_jobs)
             itemsize = self.X.dtype.itemsize
             # Target buffer size per chunk: (chunk_size * n_neighbors * n_features * itemsize)
