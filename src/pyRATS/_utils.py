@@ -1258,7 +1258,7 @@ def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
 
     Tstar_ = Tstar.reshape((len(Tstar), d, -1), order="F").transpose(2, 1, 0)
     param.T = np.matmul(param.T, Tstar_)  # update transformations of individual points
-    param.v = np.matmul(param.v[:, np.newaxis, :], Tstar_).squeeze() + Zstar[:, n:].T
+    param.v = np.matmul(param.v[:, np.newaxis, :], Tstar_)[:,0,:] + Zstar[:, n:].T
 
     return Zstar[:, :n].T
 
