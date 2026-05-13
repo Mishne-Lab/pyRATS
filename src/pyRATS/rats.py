@@ -55,6 +55,18 @@ class RATS:
     nu : int, default=3
         The ratio of the size of local views in the embedding against those in the data.
 
+    align_w_parent_only : bool, default=True
+        If True, then aligns child views the parent views only
+        in the spanning-tree-based-procrustes alignment.
+
+    tree : str, default='mst'
+        Type of spanning tree to use. Options are: spt, mst (default).
+
+    root_view : str, default='center'
+        Options are: ['center', 'largest']
+        If 'center' then uses center of spanning tree as root view
+        otherwise uses the view associated with largest cluster.
+
     max_iter : int
         Number of iterations to refine the global embedding.
         In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
@@ -103,6 +115,9 @@ class RATS:
         eta_max=25,
         to_tear=True,
         nu=3,
+        align_w_parent_only=True,
+        tree="mst",
+        root_view="center",
         max_iter=20,
         max_internal_iter=100,
         alpha=0.3,
@@ -132,6 +147,9 @@ class RATS:
         self.eta_min, self.eta_max = eta_min, eta_max
         self.to_tear = to_tear
         self.nu = nu
+        self.align_w_parent_only = align_w_parent_only
+        self.tree = tree
+        self.root_view = root_view
         self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = patience, tol
@@ -383,9 +401,12 @@ class RATS:
             compute_seq_of_views(
                 self.d,
                 self.Utilde,
+                n_C,
                 n_Utilde_Utilde,
                 self.param,
                 self.n_forced_clusters,
+                self.tree,
+                self.root_view,
                 self.verbose,
                 self.n_jobs,
             )
@@ -399,6 +420,9 @@ class RATS:
             seq_of_intermed_views_in_cluster,
             parents_of_intermed_views_in_cluster,
             self.C,
+            self.to_tear,
+            self.align_w_parent_only,
+            self.n_Utilde_Utilde,
             self.verbose,
         )
 

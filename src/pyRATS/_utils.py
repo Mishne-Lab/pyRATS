@@ -3,7 +3,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.linalg import svd, svdvals
 from scipy.sparse.linalg import svds
 from sklearn.decomposition import KernelPCA
-from scipy.sparse import csr_matrix, triu
+from scipy.sparse import csr_matrix, triu, issparse
 import itertools
 
 from joblib import delayed, Parallel
@@ -20,6 +20,8 @@ from scipy.sparse.csgraph import (
     minimum_spanning_tree,
     connected_components,
     breadth_first_order,
+    dijkstra,
+    shortest_path,
 )
 
 
@@ -808,9 +810,12 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 def compute_seq_of_views(
     d,  # embedding dimension
     i_mat,  # incidence matrix |#views| x |#points|
+    n_C,
     overlap,  # size of overlap between views |#views| x |#views|
     param,  # d-dimensional parameterization of points in each view
     n_forced_clusters,
+    tree,
+    root_view,
     verbose,
     n_jobs,
 ):
@@ -824,6 +829,8 @@ def compute_seq_of_views(
     i_mat : sparse-matrix, shape (n_samples, n_intermed_views)
         Incidence matrix
 
+    n_C :
+
     overlap : sparse-matrix, shape (n_intermed_views, n_intermed_views)
         Size of overlap between intermediate views
 
@@ -832,6 +839,10 @@ def compute_seq_of_views(
 
     n_forced_clusters : int
         Minimum no. of clusters to force in the embeddings.
+
+    tree : str
+
+    root_view : str
 
     verbose : bool
         If True, print logs to stdout.
@@ -941,10 +952,36 @@ def compute_seq_of_views(
         W_ = W[views_in_this_comp, :][:, views_in_this_comp].copy()
         if n_views_in_this_comp > 1:
             # Compute maximum spanning tree/forest of W
-            T = minimum_spanning_tree(-W_)
+            if tree == "spt":
+                _, min_max = compute_farthest_points(
+                    W_ > 0, n_points=100, return_min_max=True
+                )
+                W_.data = 1 / W_.data
+                _, pred = shortest_path(
+                    W_, return_predecessors=True, directed=False, indices=[min_max]
+                )
+                pred = pred[0, :]
+                row = []
+                col = []
+                data = []
 
-            # center_i = np.argmax(n_C[views_in_this_comp])
-            center_i = center_of_tree(T)
+                for child, parent in enumerate(pred):
+                    if parent >= 0:
+                        row.append(parent)
+                        col.append(child)
+                        data.append(1)
+
+                T = csr_matrix(
+                    (data, (row, col)),
+                    shape=(n_views_in_this_comp, n_views_in_this_comp),
+                )
+            else:
+                T = minimum_spanning_tree(-W_)
+
+            if root_view == "center":
+                center_i = center_of_tree(T)
+            else:
+                center_i = np.argmax(n_C[views_in_this_comp])
 
             seq, rho_ = breadth_first_order(
                 T, center_i, directed=False
@@ -963,6 +1000,34 @@ def compute_seq_of_views(
         cluster_of_view[seq] = i
 
     return seq_of_views_in_cluster, parents_of_views_in_cluster, cluster_of_view
+
+
+def compute_farthest_points(nbrhd_graph, s=0, n_points=20, return_min_max=False):
+    if issparse(nbrhd_graph):
+        d_e = nbrhd_graph
+    else:
+        d_e = nbrhd_graph.sparse_matrix()
+    far_off_points = [s]
+    dist_from_far_off_points = np.zeros(d_e.shape[0]) + np.inf
+    if return_min_max:
+        min_max_dist = np.inf
+        min_max = None
+    while len(far_off_points) < n_points:
+        temp = dijkstra(d_e, directed=False, indices=far_off_points[-1])
+        if return_min_max:
+            max_dist = np.max(temp)
+            if min_max_dist > max_dist:
+                min_max_dist = max_dist
+                min_max = far_off_points[-1]
+        dist_from_far_off_points = np.minimum(dist_from_far_off_points, temp)
+        non_inf_indices = np.where(~np.isinf(dist_from_far_off_points))[0]
+        far_off_points.append(
+            non_inf_indices[np.argmax(dist_from_far_off_points[non_inf_indices])]
+        )
+    if return_min_max:
+        return np.array(far_off_points), min_max
+    else:
+        return np.array(far_off_points)
 
 
 def center_of_tree(T):
@@ -986,6 +1051,9 @@ def compute_init_embedding(
     seq_of_intermed_views_in_cluster,
     parents_of_intermed_views_in_cluster,
     C,
+    to_tear,
+    align_w_parent_only,
+    n_Utilde_Utilde,
     verbose,
 ):
     """Initial alignment of datapoints in embedding via Procrustes alignment.
@@ -1000,6 +1068,12 @@ def compute_init_embedding(
     parents_of_intermed_views_in_cluster : array-like, shape (n_sampels)
 
     C : sparse-matrix, shape (n_samples, n_samples)
+
+    to_tear : bool
+
+    align_w_parent_only : bool
+
+    n_Utilde_Utilde : array-like
 
     verbose : bool
         If True, print logs to stdout.
@@ -1032,7 +1106,17 @@ def compute_init_embedding(
             {"view_index": seq_0, "data_mask": C[seq_0, :].indices}
         )
         y, is_visited_view = procrustes_init(
-            seq, rho, y, is_visited_view, d, Utilde, C, param
+            seq,
+            rho,
+            y,
+            is_visited_view,
+            d,
+            Utilde,
+            C,
+            param,
+            to_tear,
+            align_w_parent_only,
+            n_Utilde_Utilde,
         )
 
     if verbose:
@@ -1432,7 +1516,19 @@ def procrustes(A, B):
     return T, v
 
 
-def procrustes_init(seq, rho, y, is_visited_view, d, Utilde, C, param):
+def procrustes_init(
+    seq,
+    rho,
+    y,
+    is_visited_view,
+    d,
+    Utilde,
+    C,
+    param,
+    to_tear,
+    align_w_parent_only,
+    n_Utilde_Utilde,
+):
     n = Utilde.shape[1]
     # Traverse views from 2nd view
     for m in range(1, seq.shape[0]):
@@ -1441,7 +1537,23 @@ def procrustes_init(seq, rho, y, is_visited_view, d, Utilde, C, param):
         p = rho[s]
         Utilde_s = Utilde[s, :]
 
-        Z_s = [p]
+        if to_tear:
+            if align_w_parent_only:
+                Z_s = [p]
+            else:
+                raise RuntimeError("align_w_parent_only=False is not implemented")
+        else:
+            if align_w_parent_only:
+                Z_s = [p]
+            else:
+                # Align sth view with all the views which have
+                # an overlap with sth view in the ambient space
+                Z_s = n_Utilde_Utilde[s, :].multiply(is_visited_view)
+                Z_s = Z_s.nonzero()[1].tolist()
+                # If for some reason Z_s is empty
+                if len(Z_s) == 0:
+                    Z_s = [p]
+
         # Compute centroid mu_s
         # n_Utilde_s_Z_s[k] = #views in Z_s which contain
         # kth point if kth point is in the sth view, else zero
