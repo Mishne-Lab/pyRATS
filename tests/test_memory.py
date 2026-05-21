@@ -43,8 +43,9 @@ def _make_lpca_param(n=400, n_features=32, k=12, d=2, seed=0):
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    """Ensure PYRATS_MEMORY_LIMIT doesn't leak between tests."""
+    """Ensure PYRATS_MEMORY_LIMIT and the TTL cache don't leak between tests."""
     monkeypatch.delenv("PYRATS_MEMORY_LIMIT", raising=False)
+    monkeypatch.setattr(_utils, "_memory_cache", None)
     yield monkeypatch
 
 
@@ -66,9 +67,11 @@ def test_available_memory_floor(clean_env):
 
 
 def test_available_memory_is_live(clean_env):
-    """Probe must not cache: changing the env var must change the result."""
+    """Env-var changes are picked up after the TTL expires (not cached forever)."""
     clean_env.setenv("PYRATS_MEMORY_LIMIT", str(256 * 1024 * 1024))
     first = _available_memory_bytes()
+    # Expire the cache so the next call re-reads the env var.
+    clean_env.setattr(_utils, "_memory_cache", None)
     clean_env.setenv("PYRATS_MEMORY_LIMIT", str(128 * 1024 * 1024))
     second = _available_memory_bytes()
     assert second < first
@@ -109,6 +112,7 @@ def test_iter_eval_output_matches_batched_eval(clean_env):
     # Streamed: tight budget => many chunks. Sum back and compare.
     clean_env.setattr(_utils, "_MIN_MEMORY_FLOOR", 1024)
     clean_env.setenv("PYRATS_MEMORY_LIMIT", "16384")
+    clean_env.setattr(_utils, "_memory_cache", None)  # expire cache so tight cap takes effect
     streamed = np.empty_like(full)
     nchunks = 0
     for sl, chunk in p.iter_eval_(view_idx, masks):
@@ -226,6 +230,7 @@ def test_streamed_postprocess_peak_under_budget(clean_env):
     budget = 10 * pdist_per_row * 8
     clean_env.setattr(_utils, "_MIN_MEMORY_FLOOR", 1024)
     clean_env.setenv("PYRATS_MEMORY_LIMIT", str(budget))
+    clean_env.setattr(_utils, "_memory_cache", None)  # expire cache so tight cap takes effect
 
     tracemalloc.start()
     zeta = np.empty(n)
