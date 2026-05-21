@@ -7,6 +7,7 @@ from scipy.sparse import csr_matrix, triu, block_diag, diags
 import itertools
 
 from joblib import delayed, Parallel, parallel_backend
+import multiprocess as mp_lib
 
 from scipy.spatial.distance import pdist, squareform
 from sklearn.utils.extmath import svd_flip
@@ -534,7 +535,12 @@ def cost_of_moving_distortion(
     c_U_k_uniq = np.unique(c_U_k).tolist()
     cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
 
-    U_k_list = list(U_k)
+    # Reconstruct the set from neigh_ind_k inside this process: pickling and
+    # unpickling a set rebuilds the hash table with a different bucket layout,
+    # so list(U_k) iterates in a different order in the parent vs. a loky
+    # worker. Building the set from the same numpy array in each process gives
+    # the same iteration order everywhere.
+    U_k_list = list(set(neigh_ind_k))
 
     # Iterate over all m in c_{U_k}
     i = 0
@@ -673,7 +679,12 @@ def cost_of_moving_alignment_error(
     c_U_k_uniq = np.unique(c_U_k)
     cost_x_k_to = np.zeros(len(c_U_k_uniq)) + np.inf
 
-    U_k_list = list(U_k)
+    # Reconstruct the set from neigh_ind_k inside this process: pickling and
+    # unpickling a set rebuilds the hash table with a different bucket layout,
+    # so list(U_k) iterates in a different order in the parent vs. a loky
+    # worker. Building the set from the same numpy array in each process gives
+    # the same iteration order everywhere.
+    U_k_list = list(set(neigh_ind_k))
 
     neighbor_mask = (
         (n_C[c_U_k_uniq] < eta_max) & (n_C[c_U_k_uniq] >= n_C_c_k) & (c_U_k_uniq != c_k)
@@ -807,17 +818,29 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
         if n_jobs == 1 or n < 1000:
             results = [target_proc(0, n, n, Utilde, n_C, c)]
         else:
-            with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
-                results = Parallel(n_jobs=n_jobs)(
-                    delayed(target_proc)(p_num, chunk_sz, n, Utilde, n_C, c)
-                    for p_num in tqdm(
-                        range(n_jobs),
-                        desc=f"eta={eta}",
-                        unit="chunk",
-                        leave=False,
-                        disable=not verbose,
-                    )
-                )
+            # Use multiprocess.Process (fork) rather than joblib/loky (spawn).
+            # cost_of_moving reads Utilde[m], a Python set whose iteration
+            # order depends on its hash-table bucket layout. Spawn re-pickles
+            # the set and rebuilds the table with a different layout in each
+            # worker, so list(Utilde[m]) iterates in a different order than
+            # in the parent — permuting the rows/cols passed to
+            # local_param.eval_ and d_e, producing float-LSB cost diffs that
+            # flip argmin tie-breaks and yield divergent cluster
+            # assignments. Fork shares the parent's address space via
+            # copy-on-write, so the children see the exact same set layout
+            # and produce bit-identical costs to a serial run.
+            q = mp_lib.Queue()
+            def _worker(p_num):
+                q.put(target_proc(p_num, chunk_sz, n, Utilde, n_C, c))
+            procs = [
+                mp_lib.Process(target=_worker, args=(p_num,), daemon=True)
+                for p_num in range(n_jobs)
+            ]
+            for p in procs:
+                p.start()
+            results = [q.get() for _ in range(n_jobs)]
+            for p in procs:
+                p.join()
         for start_ind, end_ind, cost_, dest_ in results:
             cost[start_ind:end_ind] = cost_
             dest[start_ind:end_ind] = dest_
