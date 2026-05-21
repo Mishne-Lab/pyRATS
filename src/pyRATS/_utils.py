@@ -1181,7 +1181,7 @@ def compute_incidence_matrix_in_embedding(y, C, k, nu, metric="euclidean"):
     k_ = min(int(k * nu), n - 1)
     _, neigh_indg = nearest_neighbors(y, k_, metric)
     Ug = sparse_matrix(neigh_indg, np.ones(neigh_indg.shape, dtype=bool))
-    Utildeg = C.dot(Ug)
+    Utildeg = C.dot(Ug).astype(bool)
     return Utildeg
 
 
