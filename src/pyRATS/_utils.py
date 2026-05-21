@@ -1006,8 +1006,15 @@ def compute_seq_of_views(
         start_ind, end_ind, overlap_svals_ = value
         overlap_svals[start_ind:end_ind, :] = overlap_svals_
 
+    # In most cases, when almost all overlaps have rank d, 
+    # W_data = overlap_svals[:,-1], the d-th singular value of the overlap
+    # is sufficient to determine the priority of the overlaps.
     # overlap_svals[overlap_svals<tol] = 0
     W_data = overlap_svals[:, -1]
+    # But in cases when a low-dimensional object is embedded in a high-dimensional space,
+    # or when d is higher than the local intrinsic dimension at several points,
+    # the d-th singular value will be zero at all the points with less than d local intrinsic dimension.
+    # In such cases, we look at the (d-1)-th singular value (and so on) to determine the priority of the overlaps.
     for i in range(overlap_svals.shape[1] - 2, -1, -1):
         mask = W_data == 0
         n_zero_elem = np.sum(mask)
