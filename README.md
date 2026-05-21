@@ -33,7 +33,7 @@ import datasets, vis
 X, labels, _ = datasets.Datasets().kleinbottle4d(n=5000)
 
 # create a RATS object projecting the data to 2d while tearing the manifold
-model = rats.RATS(d=2, k=28, eta_min=5, to_tear=True)
+model = rats.RATS(n_components=2, n_neighbors=28, min_cluster_size=5, tear=True)
 y = model.fit_transform(X)
 
 # compute the gluing instructions along the tear
@@ -60,6 +60,15 @@ cd build/html
 python -m http.server 8000
 ```
 and opening http://localhost:8000 in your browser.
+
+# Memory Management
+`pyRATS` implements dynamic chunking to prevent memory spikes on large or high-dimensional datasets. By default, it attempts to use up to 75% of available system RAM. This measurement can fail and defaults to 4GB otherwise. If you need to explicitly set memory usage, set the `PYRATS_MEMORY_LIMIT` environment variable (in bytes):
+
+```bash
+# Set pyRATS memory usage to 40GB
+export PYRATS_MEMORY_LIMIT=42949672960
+python your_script.py
+```
 
 
 Citation

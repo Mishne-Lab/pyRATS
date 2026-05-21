@@ -1,0 +1,58 @@
+name: Performance Benchmark
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ 'main' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    name: RATS Benchmark (${{ matrix.os }}, ${{ matrix.ref_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ref: ["${{ github.sha }}", "5eaa1c6a82eb0a316ff2a6911e0ef7379add0bad"]
+        include:
+          - ref: "${{ github.sha }}"
+            ref_name: "Current HEAD"
+          - ref: "5eaa1c6a82eb0a316ff2a6911e0ef7379add0bad"
+            ref_name: "5eaa1c6 (Joshua V1)"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Overlay src/ from Comparison Ref
+        if: matrix.ref != github.sha
+        run: |
+          git fetch origin ${{ matrix.ref }} --depth=1
+          git checkout FETCH_HEAD -- src/
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[test]
+
+      - name: Run Benchmark
+        run: |
+          echo "## RATS Performance Benchmarks (${{ matrix.os }})" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${{ matrix.ref_name }} (${{ matrix.ref }})" >> $GITHUB_STEP_SUMMARY
+          echo "Dataset: Klein Bottle (4D)" >> $GITHUB_STEP_SUMMARY
+          python tests/scripts/benchmark.py >> $GITHUB_STEP_SUMMARY

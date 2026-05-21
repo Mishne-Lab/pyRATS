@@ -3,7 +3,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, laplacian
 import scipy
 
-from joblib import delayed, Parallel
+from joblib import delayed, Parallel, parallel_backend
+from tqdm import tqdm
 
 from pyRATS import _utils
 
@@ -67,14 +68,13 @@ def compute_spectral_color_of_pts_on_tear(
         i_mat_in_emb=i_mat_in_emb,
     )
     if pts_across_tear is None:
-        print("No tear detected.")
+        if verbose:
+            tqdm.write("No tear detected.")
         return None
     n_pts_across_tear = len(pts_across_tear)
     n_comp, labels = connected_components(
         tear_graph, directed=False, return_labels=True
     )
-    if verbose:
-        print("Number of components in the tear graph:", n_comp, flush=True)
 
     n_points_in_comp = []
     for i in range(n_comp):
@@ -91,8 +91,6 @@ def compute_spectral_color_of_pts_on_tear(
         comp_i = labels == i
         n_comp_i = np.sum(comp_i)
         scale = n_comp_i / n_pts_across_tear
-        if verbose:
-            print("#points in the tear component no.", i, "are:", n_comp_i, flush=True)
 
         # If the component is very small then assign the constant color
         if n_comp_i <= max(3, int(color_cutoff_frac * n)):
@@ -155,7 +153,7 @@ def compute_tear_graph(
     # If i_mat_in_emb if not provided
     if i_mat_in_emb is None:
         if verbose:
-            print("Metric used for computing incidence matrix in embedding:", metric)
+            tqdm.write(f"Metric used for computing incidence matrix in embedding: {metric}")
         i_mat_in_emb = _utils.compute_incidence_matrix_in_embedding(
             y, partition, k, nu, metric
         )
@@ -171,14 +169,13 @@ def compute_tear_graph(
     views_across_tear_graph.eliminate_zeros()
     # If no partitions/views are across the tear then there is no tear
     if len(views_across_tear_graph.data) == 0:
-        print("No views across the tear detected.")
+        if verbose:
+            tqdm.write("No views across the tear detected.")
         return None, None
 
     if verbose:
-        print(
-            "total #pairs of overlapping partitions/views:",
-            overlap.count_nonzero(),
-            flush=True,
+        tqdm.write(
+            f"total #pairs of overlapping partitions/views: {overlap.count_nonzero()}"
         )
     pts_across_tear, tear_graph = compute_points_across_tear_graph(
         views_across_tear_graph,
@@ -188,8 +185,8 @@ def compute_tear_graph(
         n_jobs=n_jobs,
     )
     if verbose:
-        print("#vertices in tear graph =", tear_graph.shape[0], flush=True)
-        print("#edges in tear graph =", len(tear_graph.data), flush=True)
+        tqdm.write(f"#vertices in tear graph = {tear_graph.shape[0]}")
+        tqdm.write(f"#edges in tear graph = {len(tear_graph.data)}")
     return pts_across_tear, tear_graph
 
 
@@ -208,7 +205,7 @@ def compute_points_across_tear_graph(
     )
     n_pairs = len(views_across_tear_graph_row)
     if verbose:
-        print("#pairs of partitions/views across tear:", n_pairs, flush=True)
+        tqdm.write(f"#pairs of partitions/views across tear: {n_pairs}")
 
     # Define per-pair processing function
     def process_pairs(ij_pairs):
@@ -261,10 +258,13 @@ def compute_points_across_tear_graph(
     else:
         ij_pairs_batches = [(views_across_tear_graph_row, views_across_tear_graph_col)]
 
-    # Run in parallel
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(process_pairs)(ij_pairs) for ij_pairs in ij_pairs_batches
-    )
+    # Run in parallel; cap inner BLAS threads so each loky worker doesn't
+    # spawn its own multi-threaded BLAS pool, which would cause n_jobs**2
+    # thread oversubscription against ncores hardware threads.
+    with parallel_backend("loky", inner_max_num_threads=1):
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(process_pairs)(ij_pairs) for ij_pairs in ij_pairs_batches
+        )
 
     # Aggregate results
     tear_graph_row_inds = np.concatenate([r for r, _, _ in results if len(r)])
@@ -274,7 +274,7 @@ def compute_points_across_tear_graph(
     for _, _, pts in results:
         pts_across_tear_mask[pts] = True
     if verbose:
-        print("Computing tear graph.", flush=True)
+        tqdm.write("Computing tear graph.")
     # Build sparse tear graph
     tear_graph = csr_matrix(
         (

@@ -22,10 +22,10 @@ def get_test_cases():
             # Sample name: dataset=small_spherewithhole_k=14_eta_min=5_cost-fn=distortion.res
             try:
                 dname = fname.split("dataset=")[1].split("_k=")[0]
-                k = int(fname.split("_k=")[1].split("_eta_min=")[0])
-                eta = int(fname.split("_eta_min=")[1].split("_cost-fn=")[0])
-                cfn = fname.split("_cost-fn=")[1].replace(".res", "")
-                cases.append((k, eta, cfn, dname))
+                n_neighbors = int(fname.split("_k=")[1].split("_eta_min=")[0])
+                min_cluster_size = int(fname.split("_eta_min=")[1].split("_cost-fn=")[0])
+                cost_function = fname.split("_cost-fn=")[1].replace(".res", "")
+                cases.append((n_neighbors, min_cluster_size, cost_function, dname))
             except Exception:
                 continue
     return cases
@@ -36,9 +36,9 @@ TEST_CASES = get_test_cases()
 if not TEST_CASES:
     TEST_CASES = [(14, 5, "distortion", "dummy_no_baseline")]
 
-@pytest.mark.parametrize("k,eta_min,cost_fn_name,dataset_name", TEST_CASES)
-def test_end_to_end(k, eta_min, cost_fn_name, dataset_name):
-    fname = f"dataset={dataset_name}_k={k}_eta_min={eta_min}_cost-fn={cost_fn_name}.res"
+@pytest.mark.parametrize("n_neighbors,min_cluster_size,cost_function,dataset_name", TEST_CASES)
+def test_end_to_end(n_neighbors, min_cluster_size, cost_function, dataset_name):
+    fname = f"dataset={dataset_name}_k={n_neighbors}_eta_min={min_cluster_size}_cost-fn={cost_function}.res"
     expected_path = os.path.join(EXPECTED_DIR, fname)
     actual_path = os.path.join(ACTUAL_DIR, fname)
     
