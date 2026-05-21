@@ -44,7 +44,7 @@ def _compute_tear_aware_shortest_path_distances(
     if dist is None:
         dist = _shortest_paths(y, n_nbrs=k, metric=metric, return_predqecessors=False)
 
-    output = compute_tear_graph(
+    pts_across_tear, tear_graph = compute_tear_graph(
         y,
         Utilde,
         C,
@@ -56,10 +56,9 @@ def _compute_tear_aware_shortest_path_distances(
         n_jobs,
         i_mat_in_emb=Utildeg,
     )
-    if output is None:
+    if tear_graph is None:
         return dist
-
-    pts_across_tear, tear_graph = output
+        
     tear_graph = tear_graph.tocoo()
     tear_graph_row_inds = tear_graph.row
     tear_graph_col_inds = tear_graph.col
