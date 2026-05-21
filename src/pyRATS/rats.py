@@ -443,9 +443,7 @@ class RATS:
             self.param = kpca(
                 X,
                 self.d,
-                sparse_matrix(
-                    self.neigh_ind[:, : self.k], np.ones((n, self.k), dtype=bool)
-                ),
+                self.neigh_ind[:, : self.k],
                 self.kpca_kernel,
                 self.kpca_fit_inverse_transform,
                 self.n_jobs,

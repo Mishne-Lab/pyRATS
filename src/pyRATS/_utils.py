@@ -1301,8 +1301,9 @@ def compute_final_embedding(
 
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
+        return y, Utildeg
 
-    return y, Utildeg
+    return y, None
 
 
 def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
