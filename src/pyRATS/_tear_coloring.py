@@ -75,8 +75,6 @@ def compute_spectral_color_of_pts_on_tear(
     n_comp, labels = connected_components(
         tear_graph, directed=False, return_labels=True
     )
-    if verbose:
-        tqdm.write(f"Number of components in the tear graph: {n_comp}")
 
     n_points_in_comp = []
     for i in range(n_comp):
@@ -93,8 +91,6 @@ def compute_spectral_color_of_pts_on_tear(
         comp_i = labels == i
         n_comp_i = np.sum(comp_i)
         scale = n_comp_i / n_pts_across_tear
-        if verbose:
-            tqdm.write(f"#points in the tear component no. {i} are: {n_comp_i}")
 
         # If the component is very small then assign the constant color
         if n_comp_i <= max(3, int(color_cutoff_frac * n)):

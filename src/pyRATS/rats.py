@@ -4,7 +4,7 @@ from scipy.sparse import csr_matrix
 
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from pyRATS._utils import (
     nearest_neighbors,

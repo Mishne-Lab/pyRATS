@@ -16,7 +16,7 @@ from scipy.sparse.csgraph import (
     connected_components,
     breadth_first_order,
 )
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import os
 import sys
@@ -791,7 +791,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
     # Vary eta from 2 to eta_{min}
     for eta in tqdm(
-        range(2, eta_min + 1), desc="Intermediate views", disable=not verbose
+        range(2, eta_min + 1), desc="Intermediate views", disable=not verbose, position=0, leave=True
     ):
             # tqdm.write(
             #     "#non-empty views with sz < %d = %d"
@@ -861,6 +861,7 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
                 desc="Merging",
                 unit="pts",
                 leave=False,
+                position=1,
             )
 
         total_len_S = 0
