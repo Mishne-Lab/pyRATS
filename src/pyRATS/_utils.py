@@ -1789,7 +1789,33 @@ def procrustes_init(
     return y, is_visited_view
 
 
-
+def add_spacing_between_clusters(y, seq_of_intermed_views_in_cluster, param, C):
+    n_clusters = len(seq_of_intermed_views_in_cluster)
+    if n_clusters == 1:
+        return
+    
+    M,n = C.shape
+        
+    # arrange connected components nicely
+    # spaced on horizontal (x) axis
+    offset = 0
+    cluster_label = np.zeros(y.shape[0], dtype=int)-1
+    for i in range(n_clusters):
+        seq = seq_of_intermed_views_in_cluster[i]
+        pts_in_cluster_i = np.where(C[seq,:].sum(axis=0))[1]
+        cluster_label[pts_in_cluster_i] = i
+        # make the x coordinate of the leftmost point
+        # of the ith cluster to be equal to the offset
+        if i > 0:
+            offset_ = np.min(y[pts_in_cluster_i,0])
+            param.v[seq,0] += offset - offset_
+            y[pts_in_cluster_i,0] += offset - offset_
+        
+        # recompute the offset as the x coordinate of
+        # rightmost point of the current cluster
+        offset = 1.25*np.max(y[pts_in_cluster_i,0])
+    
+    return cluster_label
 
 
 class Param:

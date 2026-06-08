@@ -16,6 +16,7 @@ from pyRATS._utils import (
     compute_init_embedding,
     compute_final_embedding,
     batched_pdist,
+    add_spacing_between_clusters,
 )
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
@@ -322,8 +323,9 @@ class RATS:
         # Construct Global views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
-        y = self._fit_global_views(c, n_C)
-
+        y, labels = self._fit_global_views(c, n_C)
+        if labels is not None:
+            return y, labels
         return y
 
     def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[0, 1, 2]):
@@ -620,9 +622,14 @@ class RATS:
             self.alpha,
             self.verbose,
         )
+
+        labels = add_spacing_between_clusters(
+            y_final, seq_of_intermed_views_in_cluster, self.param, self.C
+        )
+
         self.Utildeg = Utildeg
 
-        return y_final
+        return y_final, labels
 
     def _postprocess(self):
         """Replace high local distortion incuring parameterizations by those of neighboring points."""
