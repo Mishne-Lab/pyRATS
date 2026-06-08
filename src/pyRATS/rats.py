@@ -62,11 +62,22 @@ class RATS:
     nu : int, default=3
         The ratio of the size of local views in the embedding against those in the data.
 
-    n_iter : int, default=20
-        Number of outer iterations to refine the global embedding.
-        Riemannian gradient descent runs for n_iter * n_iter_inner total steps.
-        For every iteration the alignment of points in the embedding is recomputed
-        and the tear is re-evaluated if tear=True.
+    align_w_parent_only : bool, default=True
+        If True, then aligns child views the parent views only
+        in the spanning-tree-based-procrustes alignment.
+
+    tree : str, default='mst'
+        Type of spanning tree to use. Options are: spt, mst (default).
+
+    root_view : str, default='center'
+        Options are: ['center', 'largest']
+        If 'center' then uses center of spanning tree as root view
+        otherwise uses the view associated with largest cluster.
+
+    max_iter : int
+        Number of iterations to refine the global embedding.
+        In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
+        For every iteration in max_iter, the alignment of points in the embedding is recomputed and the tear is re-evaluated if to_tear=True.
 
     n_iter_inner : int, default=100
         Number of internal iterations used by Riemannian Gradient Descent per outer step.
@@ -128,8 +139,11 @@ class RATS:
         max_cluster_size=25,
         tear=True,
         nu=3,
-        n_iter=20,
-        n_iter_inner=100,
+        align_w_parent_only=True,
+        tree="mst",
+        root_view="center",
+        max_iter=20,
+        max_internal_iter=100,
         alpha=0.3,
         eps=1e-8,
         n_iter_without_progress=5,
@@ -240,7 +254,10 @@ class RATS:
         self.eta_min, self.eta_max = min_cluster_size, max_cluster_size
         self.to_tear = tear
         self.nu = nu
-        self.max_iter, self.max_internal_iter = n_iter, n_iter_inner
+        self.align_w_parent_only = align_w_parent_only
+        self.tree = tree
+        self.root_view = root_view
+        self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = n_iter_without_progress, tol
         self.metric = metric
@@ -560,9 +577,12 @@ class RATS:
             compute_seq_of_views(
                 self.d,
                 self.Utilde,
+                n_C,
                 n_Utilde_Utilde,
                 self.param,
                 self.n_forced_clusters,
+                self.tree,
+                self.root_view,
                 self.verbose,
                 self.n_jobs,
             )
@@ -576,6 +596,9 @@ class RATS:
             seq_of_intermed_views_in_cluster,
             parents_of_intermed_views_in_cluster,
             self.C,
+            self.to_tear,
+            self.align_w_parent_only,
+            self.n_Utilde_Utilde,
             self.verbose,
         )
 
