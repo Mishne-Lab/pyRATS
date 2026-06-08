@@ -143,8 +143,8 @@ class RATS:
         align_w_parent_only=True,
         tree="mst",
         root_view="center",
-        max_iter=20,
-        max_internal_iter=100,
+        n_iter=20,
+        n_iter_inner=100,
         alpha=0.3,
         eps=1e-8,
         n_iter_without_progress=5,
@@ -258,7 +258,7 @@ class RATS:
         self.align_w_parent_only = align_w_parent_only
         self.tree = tree
         self.root_view = root_view
-        self.max_iter, self.max_internal_iter = max_iter, max_internal_iter
+        self.max_iter, self.max_internal_iter = n_iter, n_iter_inner
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = n_iter_without_progress, tol
         self.metric = metric
@@ -359,7 +359,7 @@ class RATS:
             tear_color_eig_inds,
             self.k,
             self.nu,
-            self.metric,
+            'euclidean',
             self.verbose,
             self.n_jobs,
             self.Utildeg,

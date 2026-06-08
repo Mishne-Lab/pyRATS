@@ -478,7 +478,6 @@ def induce_connections(X, metric, condition_num, neigh_ind, neigh_dist, k_nn0):
         neigh_dist_ = np.zeros_like(neigh_dist)
         uniq_cond_nums = np.unique(condition_num)
         for i in range(uniq_cond_nums.shape[0]):
-            print('Processing condition number:', i, flush=True)
             cond_num_i = uniq_cond_nums[i]
             mask = condition_num == cond_num_i
             inds = np.where(mask)[0]
