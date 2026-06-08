@@ -472,6 +472,30 @@ def nearest_neighbors(X, k, metric, sort_results=True, n_jobs=-1):
     return neigh_dist, neigh_ind
 
 
+def induce_connections(X, metric, condition_num, neigh_ind, neigh_dist, k_nn0):
+        d_e = squareform(pdist(X, metric=metric))
+        neigh_ind_ = np.zeros_like(neigh_ind)
+        neigh_dist_ = np.zeros_like(neigh_dist)
+        uniq_cond_nums = np.unique(condition_num)
+        for i in range(uniq_cond_nums.shape[0]):
+            print('Processing condition number:', i, flush=True)
+            cond_num_i = uniq_cond_nums[i]
+            mask = condition_num == cond_num_i
+            inds = np.where(mask)[0]
+            d_e_ = d_e.copy()
+            d_e_[np.ix_(mask,mask)] = np.inf
+            for k in inds.tolist():
+                d_e_[k,neigh_ind[k,:]] = np.inf
+                neigh_ind_[k,:] = np.argpartition(d_e_[k,:], k_nn0)[:k_nn0]
+                neigh_dist_[k,:] = d_e_[k,neigh_ind_[k,:]]
+        
+        return (
+            np.concatenate([neigh_dist, neigh_dist_], axis=1),
+            np.concatenate([neigh_ind, neigh_ind_], axis=1),
+            k_nn0 * 2,
+        )
+
+
 def cost_of_moving_distortion(
     k, d_e, neigh_ind_k, U_k, local_param, c, n_C, Utilde, eta_min, eta_max, n_jobs=1
 ):

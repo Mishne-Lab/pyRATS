@@ -17,6 +17,7 @@ from pyRATS._utils import (
     compute_final_embedding,
     batched_pdist,
     add_spacing_between_clusters,
+    induce_connections,
 )
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
@@ -95,8 +96,7 @@ class RATS:
         relative change in the size of the tear.
 
     metric : str, default='euclidean'
-        To be added in future releases. Metric assumed on the embedding.
-        Currently only 'euclidean' is supported.
+        Metric assumed on the embedding. 
 
     fit_inverse_transform : bool, default=False
         To be added in future releases. If True, computes the inverse of the embedding
@@ -281,13 +281,15 @@ class RATS:
             )
             self.n_jobs = cores
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, condition_num=None):
         """Fit the model on the data in X, and transform X.
 
         Parameters
         ---------
         X : array-like, shape (n_samples, n_features)
             Sample data, in the form of a numpy array of shape (n_samples, n_features).
+
+        condition_num : 
 
         Returns
         -------
@@ -299,7 +301,7 @@ class RATS:
 
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Fitting neighborhood graph...")
-        self._fit_nbrhd_graph(X)
+        self._fit_nbrhd_graph(X, condition_num)
         current_step += 1
 
         # Construct low dimensional local views
@@ -414,13 +416,15 @@ class RATS:
         )
 
 
-    def _fit_nbrhd_graph(self, X, sort_results=True):
+    def _fit_nbrhd_graph(self, X, condition_num=None, sort_results=True):
         """Fitting the neighborhood graph.
 
         Parameters
         ----------
         X : array shape (n_samples, n_features)
             A 2d array containing data representing a manifold.
+
+        condition_num : 
 
         sort_results: bool, default=True
             If True, sorts neighbors by index in ascending order for deterministic behavior.
@@ -430,6 +434,12 @@ class RATS:
         self.neigh_dist, self.neigh_ind = nearest_neighbors(
             X, self.k_nn0, self.metric, sort_results, self.n_jobs
         )
+
+        if condition_num is not None:
+            self.neigh_dist, self.neigh_ind, self.k_nn0 = induce_connections(
+                X, self.metric, condition_num, self.neigh_ind, self.neigh_dist, self.k_nn0,
+            )
+            self.k = self.k_nn0
 
         self.U = sparse_matrix(  # needed for distortion cost_fn
             self.neigh_ind[:, : self.k], np.ones((len(X), self.k), dtype=bool)
