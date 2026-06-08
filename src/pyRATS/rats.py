@@ -21,7 +21,6 @@ from pyRATS._utils import (
 )
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
-
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
 
 
@@ -96,7 +95,7 @@ class RATS:
         relative change in the size of the tear.
 
     metric : str, default='euclidean'
-        Metric assumed on the embedding. 
+        Metric assumed on the embedding.
 
     fit_inverse_transform : bool, default=False
         To be added in future releases. If True, computes the inverse of the embedding
@@ -149,7 +148,11 @@ class RATS:
         eps=1e-8,
         n_iter_without_progress=5,
         tol=1e-2,
+        repel_by=0.0,
+        repel_decay=1.0,
+        n_repel=0.0,
         n_forced_clusters=1,
+        global_init_algo_name="procrustes",
         verbose=False,
         n_jobs=-1,
         **kwargs,
@@ -262,7 +265,9 @@ class RATS:
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = n_iter_without_progress, tol
         self.metric = metric
+        self.repel_by, self.repel_decay, self.n_repel = repel_by, repel_decay, n_repel
         self.n_forced_clusters = n_forced_clusters
+        self.global_init_algo_name = global_init_algo_name
 
         if self.patience is None:
             self.patience = self.max_iter
@@ -289,7 +294,7 @@ class RATS:
         X : array-like, shape (n_samples, n_features)
             Sample data, in the form of a numpy array of shape (n_samples, n_features).
 
-        condition_num : 
+        condition_num :
 
         Returns
         -------
@@ -359,7 +364,7 @@ class RATS:
             tear_color_eig_inds,
             self.k,
             self.nu,
-            'euclidean',
+            "euclidean",
             self.verbose,
             self.n_jobs,
             self.Utildeg,
@@ -411,10 +416,7 @@ class RATS:
         X : array-like, shape (n_samples, n_features)
             Points in the original space.
         """
-        raise NotImplementedError(
-            "inverse_transform() is not yet implemented."
-        )
-
+        raise NotImplementedError("inverse_transform() is not yet implemented.")
 
     def _fit_nbrhd_graph(self, X, condition_num=None, sort_results=True):
         """Fitting the neighborhood graph.
@@ -424,7 +426,7 @@ class RATS:
         X : array shape (n_samples, n_features)
             A 2d array containing data representing a manifold.
 
-        condition_num : 
+        condition_num :
 
         sort_results: bool, default=True
             If True, sorts neighbors by index in ascending order for deterministic behavior.
@@ -437,7 +439,12 @@ class RATS:
 
         if condition_num is not None:
             self.neigh_dist, self.neigh_ind, self.k_nn0 = induce_connections(
-                X, self.metric, condition_num, self.neigh_ind, self.neigh_dist, self.k_nn0,
+                X,
+                self.metric,
+                condition_num,
+                self.neigh_ind,
+                self.neigh_dist,
+                self.k_nn0,
             )
             self.k = self.k_nn0
 
@@ -601,8 +608,9 @@ class RATS:
         )
 
         # Compute initial embedding
-        y_init = compute_init_embedding(
+        y_init, far_off_points = compute_init_embedding(
             self.d,
+            self.neighborhood_graph_sym,
             self.Utilde,
             self.param,
             seq_of_intermed_views_in_cluster,
@@ -611,6 +619,10 @@ class RATS:
             self.to_tear,
             self.align_w_parent_only,
             self.n_Utilde_Utilde,
+            self.repel_by,
+            self.repel_decay,
+            self.n_repel,
+            self.global_init_algo_name,
             self.verbose,
         )
 
@@ -630,6 +642,9 @@ class RATS:
             self.k,
             self.metric,
             self.alpha,
+            self.repel_by,
+            self.repel_decay,
+            far_off_points,
             self.verbose,
         )
 
@@ -668,19 +683,20 @@ class RATS:
         zeta = np.empty(n)
         view_idx = np.arange(n, dtype=int)
         masks_init = self.U.indices.reshape(n, self.k)
-        for sl, chunk in self.param.iter_eval_(view_idx, masks_init,
-                                               peak_bytes_per_row=pdist_per_row):
+        for sl, chunk in self.param.iter_eval_(
+            view_idx, masks_init, peak_bytes_per_row=pdist_per_row
+        ):
             chunk_dists = batched_pdist(chunk)
             chunk_orig = original_dists[sl]
             dlc = np.divide(
-                chunk_dists, chunk_orig,
+                chunk_dists,
+                chunk_orig,
                 out=np.full_like(chunk_dists, np.nan),
                 where=chunk_orig != 0,
             )
             zeta[sl] = np.nanmax(dlc, axis=1) / (np.nanmin(dlc, axis=1) + 1e-12)
 
         self.param.zeta = zeta
-
 
         connectivity_matrix = self.U.indices.reshape(n, -1)
         future_use_phi_of = np.arange(n, dtype=int)
@@ -693,9 +709,8 @@ class RATS:
         while len(param_changed) > 0:
             changed_mask = np.zeros(n, dtype=bool)
             changed_mask[param_changed] = True
-            reconsider_mask = (
-                changed_mask[connectivity_matrix]
-                & (connectivity_matrix != np.arange(n)[:, None])
+            reconsider_mask = changed_mask[connectivity_matrix] & (
+                connectivity_matrix != np.arange(n)[:, None]
             )
 
             zeta_min = np.full(n, np.inf)
@@ -720,7 +735,8 @@ class RATS:
                     chunk_dists = batched_pdist(chunk)
                     chunk_orig = batch_original_dists[sl]
                     dlc = np.divide(
-                        chunk_dists, chunk_orig,
+                        chunk_dists,
+                        chunk_orig,
                         out=np.full_like(chunk_dists, np.nan),
                         where=chunk_orig != 0,
                     )
@@ -738,7 +754,6 @@ class RATS:
                 connectivity_matrix[param_changed, best_col[param_changed]]
             ]
             zeta = np.minimum(zeta, zeta_min)
-
             if self.verbose:
                 pbar.update(n - len(param_changed) - pbar.n)
 

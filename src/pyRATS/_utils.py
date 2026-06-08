@@ -9,6 +9,7 @@ import itertools
 from joblib import delayed, Parallel, parallel_backend
 import multiprocess as mp_lib
 
+import scipy
 from scipy.spatial.distance import pdist, squareform
 from sklearn.utils.extmath import svd_flip
 from scipy.sparse.csgraph import (
@@ -39,8 +40,10 @@ def _cgroup_available_bytes():
         return None
     pairs = (
         ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
-        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
-         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+        (
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
     )
     for max_path, cur_path in pairs:
         try:
@@ -86,6 +89,7 @@ def _available_memory_bytes():
 
     try:
         import psutil
+
         avail = int(psutil.virtual_memory().available * 0.75)
     except (ImportError, AttributeError):
         avail = _FALLBACK_MEMORY
@@ -203,14 +207,20 @@ def lpca(X, d, U, n_jobs, verbose=False):
         return start_ind, end_ind, Psi, mu, var_explained, n_pc_dir_chosen
 
     chunk_sz = int(n / n_jobs)
-    if n_jobs == 1 or n < 1000: # Threshold for Parallel overhead
+    if n_jobs == 1 or n < 1000:  # Threshold for Parallel overhead
         results = [target_proc(0, n)]
     else:
-        with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
+        with parallel_backend(
+            "loky", inner_max_num_threads=_inner_blas_threads(n_jobs)
+        ):
             results = Parallel(n_jobs=n_jobs)(
                 delayed(target_proc)(i, chunk_sz)
                 for i in tqdm(
-                    range(n_jobs), desc="PCA", unit="chunk", leave=False, disable=not verbose
+                    range(n_jobs),
+                    desc="PCA",
+                    unit="chunk",
+                    leave=False,
+                    disable=not verbose,
                 )
             )
 
@@ -295,7 +305,11 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
         results = Parallel(n_jobs=n_jobs)(
             delayed(target_proc)(p_num, chunk_sz)
             for p_num in tqdm(
-                range(n_jobs), desc="KPCA", unit="chunk", leave=False, disable=not verbose
+                range(n_jobs),
+                desc="KPCA",
+                unit="chunk",
+                leave=False,
+                disable=not verbose,
             )
         )
 
@@ -357,9 +371,9 @@ def batched_pdist(x):
 
     n, k, _ = x.shape
     # Precompute all upper-triangle pair indices (same order as the original loop)
-    pair_i, pair_j = np.triu_indices(k, k=1)          # each shape (num_pairs,)
-    diff = x[:, pair_i, :] - x[:, pair_j, :]          # (n, num_pairs, d)
-    return np.sqrt(np.sum(diff * diff, axis=-1))        # (n, num_pairs)
+    pair_i, pair_j = np.triu_indices(k, k=1)  # each shape (num_pairs,)
+    diff = x[:, pair_i, :] - x[:, pair_j, :]  # (n, num_pairs, d)
+    return np.sqrt(np.sum(diff * diff, axis=-1))  # (n, num_pairs)
 
 
 def batched_procrustes_cost(X, Y):
@@ -473,26 +487,26 @@ def nearest_neighbors(X, k, metric, sort_results=True, n_jobs=-1):
 
 
 def induce_connections(X, metric, condition_num, neigh_ind, neigh_dist, k_nn0):
-        d_e = squareform(pdist(X, metric=metric))
-        neigh_ind_ = np.zeros_like(neigh_ind)
-        neigh_dist_ = np.zeros_like(neigh_dist)
-        uniq_cond_nums = np.unique(condition_num)
-        for i in range(uniq_cond_nums.shape[0]):
-            cond_num_i = uniq_cond_nums[i]
-            mask = condition_num == cond_num_i
-            inds = np.where(mask)[0]
-            d_e_ = d_e.copy()
-            d_e_[np.ix_(mask,mask)] = np.inf
-            for k in inds.tolist():
-                d_e_[k,neigh_ind[k,:]] = np.inf
-                neigh_ind_[k,:] = np.argpartition(d_e_[k,:], k_nn0)[:k_nn0]
-                neigh_dist_[k,:] = d_e_[k,neigh_ind_[k,:]]
-        
-        return (
-            np.concatenate([neigh_dist, neigh_dist_], axis=1),
-            np.concatenate([neigh_ind, neigh_ind_], axis=1),
-            k_nn0 * 2,
-        )
+    d_e = squareform(pdist(X, metric=metric))
+    neigh_ind_ = np.zeros_like(neigh_ind)
+    neigh_dist_ = np.zeros_like(neigh_dist)
+    uniq_cond_nums = np.unique(condition_num)
+    for i in range(uniq_cond_nums.shape[0]):
+        cond_num_i = uniq_cond_nums[i]
+        mask = condition_num == cond_num_i
+        inds = np.where(mask)[0]
+        d_e_ = d_e.copy()
+        d_e_[np.ix_(mask, mask)] = np.inf
+        for k in inds.tolist():
+            d_e_[k, neigh_ind[k, :]] = np.inf
+            neigh_ind_[k, :] = np.argpartition(d_e_[k, :], k_nn0)[:k_nn0]
+            neigh_dist_[k, :] = d_e_[k, neigh_ind_[k, :]]
+
+    return (
+        np.concatenate([neigh_dist, neigh_dist_], axis=1),
+        np.concatenate([neigh_ind, neigh_ind_], axis=1),
+        k_nn0 * 2,
+    )
 
 
 def cost_of_moving_distortion(
@@ -612,7 +626,7 @@ def cost_of_moving_distortion(
 
 def compute_zeta(d_e_mask0, Psi_k_mask):
     """Computes the local distortion zeta for a given parameterization and neighborhood distances.
-    
+
     Parameters
     ----------
     d_e_mask0 : sparse matrix or array-like
@@ -625,16 +639,16 @@ def compute_zeta(d_e_mask0, Psi_k_mask):
     d_e_mask = d_e_mask0.toarray() if hasattr(d_e_mask0, "toarray") else d_e_mask0
     if d_e_mask.shape[0] <= 1:
         return 1
-    
+
     # Use squareform/pdist for efficient pair extraction on small dense matrices
     d_e_mask_ = squareform(d_e_mask)
     mask = d_e_mask_ != 0
     if not np.any(mask):
         return 1
-    
+
     d_e_vals = d_e_mask_[mask]
     dist_embedded = pdist(Psi_k_mask)[mask]
-    
+
     disc_lip_const = dist_embedded / d_e_vals
     return np.max(disc_lip_const) / (np.min(disc_lip_const) + 1e-12)
 
@@ -720,7 +734,7 @@ def cost_of_moving_alignment_error(
     evals = param.batched_eval_(
         c_U_k_uniq_k,
         np.broadcast_to(U_k_list, [len(c_U_k_uniq_k), len(U_k_list)]),
-        n_jobs=n_jobs
+        n_jobs=n_jobs,
     )
 
     m = c_U_k_uniq_k == k
@@ -816,13 +830,17 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
     # Vary eta from 2 to eta_{min}
     for eta in tqdm(
-        range(2, eta_min + 1), desc="Intermediate views", disable=not verbose, position=0, leave=True
+        range(2, eta_min + 1),
+        desc="Intermediate views",
+        disable=not verbose,
+        position=0,
+        leave=True,
     ):
-            # tqdm.write(
-            #     "#non-empty views with sz < %d = %d"
-            #     % (eta, np.sum((n_C > 0) * (n_C < eta)))
-            # )
-            # tqdm.write("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
+        # tqdm.write(
+        #     "#non-empty views with sz < %d = %d"
+        #     % (eta, np.sum((n_C > 0) * (n_C < eta)))
+        # )
+        # tqdm.write("#nodes in views with sz < %d = %d" % (eta, np.sum(n_C[c] < eta)))
 
         def target_proc(p_num, chunk_sz, n_, Utilde, n_C, c):
             start_ind = p_num * chunk_sz
@@ -835,7 +853,17 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             dest_ = np.zeros(end_ind - start_ind, dtype="int") - 1
             for i, k in enumerate(range(start_ind, end_ind)):
                 cost_[i], dest_[i] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max, n_jobs=n_jobs
+                    k,
+                    d_e,
+                    neigh_ind[k],
+                    U_[k],
+                    param,
+                    c,
+                    n_C,
+                    Utilde,
+                    eta,
+                    eta_max,
+                    n_jobs=n_jobs,
                 )
             return start_ind, end_ind, cost_, dest_
 
@@ -855,8 +883,10 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
             # copy-on-write, so the children see the exact same set layout
             # and produce bit-identical costs to a serial run.
             q = mp_lib.Queue()
+
             def _worker(p_num):
                 q.put(target_proc(p_num, chunk_sz, n, Utilde, n_C, c))
+
             procs = [
                 mp_lib.Process(target=_worker, args=(p_num,), daemon=True)
                 for p_num in range(n_jobs)
@@ -921,7 +951,17 @@ def best(d_e, U, param, eta_min, eta_max, cost_fn, verbose, n_jobs):
 
             for k in S:
                 cost[k], dest[k] = cost_of_moving(
-                    k, d_e, neigh_ind[k], U_[k], param, c, n_C, Utilde, eta, eta_max, n_jobs=1
+                    k,
+                    d_e,
+                    neigh_ind[k],
+                    U_[k],
+                    param,
+                    c,
+                    n_C,
+                    Utilde,
+                    eta,
+                    eta_max,
+                    n_jobs=1,
                 )
 
             if verbose:
@@ -1032,16 +1072,19 @@ def compute_seq_of_views(
     if n_jobs == 1 or n_elem < 1000:
         res = [target_proc(p_num) for p_num in range(n_jobs)]
     else:
-        with parallel_backend("loky", inner_max_num_threads=_inner_blas_threads(n_jobs)):
-            res = list(Parallel(n_jobs=n_jobs,
-                                return_as="generator_unordered")(
-                delayed(target_proc)(p_num) for p_num in range(n_jobs)
-            ))
+        with parallel_backend(
+            "loky", inner_max_num_threads=_inner_blas_threads(n_jobs)
+        ):
+            res = list(
+                Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
+                    delayed(target_proc)(p_num) for p_num in range(n_jobs)
+                )
+            )
     for value in res:
         start_ind, end_ind, overlap_svals_ = value
         overlap_svals[start_ind:end_ind, :] = overlap_svals_
 
-    # In most cases, when almost all overlaps have rank d, 
+    # In most cases, when almost all overlaps have rank d,
     # W_data = overlap_svals[:,-1], the d-th singular value of the overlap
     # is sufficient to determine the priority of the overlaps.
     # overlap_svals[overlap_svals<tol] = 0
@@ -1186,6 +1229,7 @@ def center_of_tree(T):
 
 def compute_init_embedding(
     d,
+    d_e,
     Utilde,
     param,
     seq_of_intermed_views_in_cluster,
@@ -1194,6 +1238,10 @@ def compute_init_embedding(
     to_tear,
     align_w_parent_only,
     n_Utilde_Utilde,
+    repel_by,
+    repel_decay,
+    n_repel,
+    global_init_algo_name,
     verbose,
 ):
     """Initial alignment of datapoints in embedding via Procrustes alignment.
@@ -1214,6 +1262,14 @@ def compute_init_embedding(
     align_w_parent_only : bool
 
     n_Utilde_Utilde : array-like
+
+    repel_by :
+
+    repel_decay :
+
+    n_repel :
+
+    global_init_algo_name : str
 
     verbose : bool
         If True, print logs to stdout.
@@ -1242,28 +1298,44 @@ def compute_init_embedding(
         rho = parents_of_intermed_views_in_cluster[i]
         seq_0 = seq[0]
         is_visited_view[seq_0] = True
-        y[C[seq_0, :].indices, :] = param.eval_(
-            seq_0, C[seq_0, :].indices
-        )
-        y, is_visited_view = procrustes_init(
-            seq,
-            rho,
-            y,
-            is_visited_view,
-            d,
-            Utilde,
-            C,
-            param,
-            to_tear,
-            align_w_parent_only,
-            n_Utilde_Utilde,
-        )
+        y[C[seq_0, :].indices, :] = param.eval_(seq_0, C[seq_0, :].indices)
+        far_off_points = compute_far_off_points(d_e, n_repel)
+
+        if global_init_algo_name == "procrustes":
+            y, is_visited_view = procrustes_init(
+                seq,
+                rho,
+                y,
+                is_visited_view,
+                d,
+                Utilde,
+                C,
+                param,
+                to_tear,
+                align_w_parent_only,
+                n_Utilde_Utilde,
+            )
+        elif global_init_algo_name == "spectral":
+            y = spectral_alignment(
+                y,
+                d,
+                Utilde,
+                C,
+                param,
+                repel_by,
+                repel_decay,
+                n_repel,
+                far_off_points,
+                seq_of_intermed_views_in_cluster,
+            )
+        else:
+            raise NotImplementedError()
 
     if verbose:
-        err = compute_alignment_err(d, Utilde, param, verbose)
+        err = compute_alignment_err(d, Utilde, param, repel_by, far_off_points, verbose)
         print("Alignment error: %0.3f" % (err / Utilde.nnz), flush=True)
 
-    return y
+    return y, far_off_points
 
 
 def compute_incidence_matrix_in_embedding(y, C, k, nu, metric="euclidean"):
@@ -1315,6 +1387,9 @@ def compute_final_embedding(
     k,
     metric,
     alpha,
+    repel_by,
+    repel_decay,
+    far_off_points,
     verbose,
 ):
     """Align clusters via Riemannian Gradient Descent.
@@ -1394,11 +1469,22 @@ def compute_final_embedding(
             Utilde_t = Utildeg.multiply(Utilde)
             Utilde_t.eliminate_zeros()
 
-        y = rgd_alignment(d, Utilde_t, param, max_internal_iter, alpha, verbose)
+        y = rgd_alignment(
+            d,
+            Utilde_t,
+            param,
+            max_internal_iter,
+            alpha,
+            repel_by,
+            far_off_points,
+            verbose,
+        )
         if (
             patience_ctr < max_iter or verbose
         ):  # If it makes sense to compute the error or verbose
-            err = compute_alignment_err(d, Utilde_t, param, verbose)
+            err = compute_alignment_err(
+                d, Utilde_t, param, repel_by, far_off_points, verbose
+            )
             E_Gamma_t = Utilde_t.nnz
             err = err / E_Gamma_t
             if prev_err is not None:
@@ -1414,6 +1500,9 @@ def compute_final_embedding(
             if patience_ctr <= 0:
                 break
 
+        if repel_by is not None:
+            repel_by *= repel_decay
+
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
         return y, Utildeg
@@ -1421,7 +1510,9 @@ def compute_final_embedding(
     return y, None
 
 
-def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
+def rgd_alignment(
+    d, Utilde, param, max_internal_iter, alpha, repel_by, far_off_points, verbose
+):
     """Riemannian Gradient Descent (RGD)
 
     Parameters
@@ -1469,7 +1560,9 @@ def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
 
         return O_.transpose(1, 2, 0).reshape(O.shape, order="F")
 
-    CC, Lpinv_BT, _, _ = build_ortho_optim(d, Utilde, param, verbose)
+    CC, Lpinv_BT, _, _ = build_ortho_optim(
+        d, Utilde, param, repel_by, far_off_points, verbose
+    )
     M, n = Utilde.shape
 
     Tstar = update(
@@ -1480,7 +1573,7 @@ def rgd_alignment(d, Utilde, param, max_internal_iter, alpha, verbose):
 
     Tstar_ = Tstar.reshape((len(Tstar), d, -1), order="F").transpose(2, 1, 0)
     param.T = np.matmul(param.T, Tstar_)  # update transformations of individual points
-    param.v = np.matmul(param.v[:, np.newaxis, :], Tstar_)[:,0,:] + Zstar[:, n:].T
+    param.v = np.matmul(param.v[:, np.newaxis, :], Tstar_)[:, 0, :] + Zstar[:, n:].T
 
     return Zstar[:, :n].T
 
@@ -1492,12 +1585,12 @@ def compute_Lpinv_helpers(W):
     D_2 = np.asarray(B_.sum(axis=0))
     D_1_inv_sqrt = np.sqrt(1 / D_1).flatten()
     D_2_inv_sqrt = np.sqrt(1 / D_2).flatten()
-    
-    #B_tilde = B_.multiply(D_2_inv_sqrt).multiply(D_1_inv_sqrt)
+
+    # B_tilde = B_.multiply(D_2_inv_sqrt).multiply(D_1_inv_sqrt)
     # Create sparse diagonal matrices
     D1_diag = diags(D_1_inv_sqrt)
     D2_diag = diags(D_2_inv_sqrt)
-    
+
     # Sparse matrix multiplication is MUCH faster than .multiply()
     B_tilde = D1_diag @ B_ @ D2_diag
 
@@ -1508,35 +1601,35 @@ def compute_Lpinv_helpers(W):
         # Sparse matrix multiplication here is incredibly fast.
         C = (B_tilde.T @ B_tilde).todense()
         S2, V = eigh(C)
-        
+
         # eigh returns ascending order; reverse to match standard SVD output
         idx = np.argsort(S2)[::-1]
         S2 = S2[idx]
         V = V[:, idx]
-        
+
         # Recover singular values and right singular vectors
         SS = np.sqrt(np.maximum(S2, 0))
         VT = V.T
-        
+
         # Recover left singular vectors: U = B_tilde @ V @ diag(1/SS)
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             SS_inv = np.where(SS > 1e-10, 1.0 / SS, 0.0)
-            
+
         U12 = (B_tilde @ V) * SS_inv[np.newaxis, :]
     else:
         # Fallback if M > n: Compute (n, n) Gram matrix instead
         C = (B_tilde @ B_tilde.T).todense()
         S2, U12 = eigh(C)
-        
+
         idx = np.argsort(S2)[::-1]
         S2 = S2[idx]
         U12 = U12[:, idx]
-        
+
         SS = np.sqrt(np.maximum(S2, 0))
-        
-        with np.errstate(divide='ignore', invalid='ignore'):
+
+        with np.errstate(divide="ignore", invalid="ignore"):
             SS_inv = np.where(SS > 1e-10, 1.0 / SS, 0.0)
-            
+
         VT = (U12.T @ B_tilde) * SS_inv[:, np.newaxis]
     # -------------------------------------------
     U12, VT = svd_flip(U12, VT)
@@ -1551,7 +1644,16 @@ def compute_Lpinv_helpers(W):
     U2 = U12[:, m_1:]
     V1 = V[:, :m_1]
     V2 = V[:, m_1:]
-    return [D_1_inv_sqrt[:,None], D_2_inv_sqrt[None,:], U1, U2, V1, V2, Sigma_1, Sigma_2]
+    return [
+        D_1_inv_sqrt[:, None],
+        D_2_inv_sqrt[None, :],
+        U1,
+        U2,
+        V1,
+        V2,
+        Sigma_1,
+        Sigma_2,
+    ]
 
 
 # Ngoc-Diep Ho, Paul Van Dooren, On the pseudo-inverse of the Laplacian of a bipartite graph
@@ -1570,7 +1672,7 @@ def compute_Lpinv_MT(Lpinv_helpers, B):
 
     # Optimized matrix-vector products using identities to avoid full dense B_n
     # Identity: U^T (diag(D) (B - mu 1^T))^T = (U^T diag(D)) B^T - (U^T diag(D) 1) mu^T
-    
+
     # Compute U^T * B1T terms
     U1T_D1 = (U1 * D_1_inv_sqrt).T  # (m1, n)
     U1TB1T = (U1T_D1 @ B1.T) - (U1T_D1.sum(axis=1)[:, None] @ B_mean.T)
@@ -1617,27 +1719,27 @@ def compute_CC(D, B, Lpinv_BT):
     return 0.5 * (CC + CC.T)
 
 
-def build_ortho_optim(d, Utilde, param, verbose):
+def build_ortho_optim(d, Utilde, param, repel_by, far_off_points=[], verbose=False):
     """Compute the Graph-Laplacian's inverse times B^\top."""
     M, n = Utilde.shape
     W = Utilde.astype(float)
     W_vals_all = W.data
-    
+
     # Vectorized construction of D and B components
     D_list = []
-    
+
     # We still loop over M to build B values, but we use pre-allocated arrays
     # or better, compute B values in blocks.
     B_data_vals = []
     B_cluster_vals = []
     B_cols = []
-    
+
     for i in range(M):
         Utilde_i = Utilde[i, :].indices
         X_ = param.eval_(i, Utilde_i)
-        weights_i = W_vals_all[W.indptr[i]:W.indptr[i+1]]
+        weights_i = W_vals_all[W.indptr[i] : W.indptr[i + 1]]
         sqrt_p_ki = np.sqrt(weights_i[:, None])
-        
+
         # Weighted embeddings for D: sqrt(W) * X
         X_weighted = sqrt_p_ki * X_
         D_list.append(X_weighted.T @ X_weighted)
@@ -1649,19 +1751,21 @@ def build_ortho_optim(d, Utilde, param, verbose):
         B_cols.append(Utilde_i)
 
     D = block_diag(D_list, format="csr")
-    
+
     # Efficiently construct B
     B_data_vals = np.concatenate(B_data_vals)
     B_cluster_vals = np.concatenate(B_cluster_vals)
-    
+
     B_cols_data = []
     for i in range(M):
         B_cols_data.append(np.tile(B_cols[i], d))
     B_cols_data = np.concatenate(B_cols_data)
-    
+
     # Row indices for data values
     counts = np.diff(W.indptr)
-    B_rows_data = np.repeat(np.arange(M) * d, counts * d) + np.tile(np.arange(d), len(B_cols_data) // d)
+    B_rows_data = np.repeat(np.arange(M) * d, counts * d) + np.tile(
+        np.arange(d), len(B_cols_data) // d
+    )
     # Wait, the above tiling is not quite right if counts vary.
     # Correct rows: repeat each row index (i*d + offset)
     B_rows_data = []
@@ -1673,23 +1777,70 @@ def build_ortho_optim(d, Utilde, param, verbose):
     # B indices for cluster nodes
     B_rows_cluster = np.arange(M * d)
     B_cols_cluster = np.repeat(np.arange(n, n + M), d)
-    
+
     # Combine everything
     B_row_all = np.concatenate([B_rows_cluster, B_rows_data])
     B_col_all = np.concatenate([B_cols_cluster, B_cols_data])
     B_val_all = np.concatenate([B_cluster_vals, B_data_vals])
-    
+
     B = csr_matrix((B_val_all, (B_row_all, B_col_all)), shape=(M * d, n + M))
 
     Lpinv_helpers = compute_Lpinv_helpers(W)
     Lpinv_BT = compute_Lpinv_MT(Lpinv_helpers, B)
     CC = compute_CC(D, B, Lpinv_BT)
 
+    n_repel = len(far_off_points)
+    if n_repel > 0:
+        L_r = np.zeros((n_repel, n_repel))
+        L__row_inds = []
+        L__col_inds = []
+        L__vals = []
+        for i in range(n_repel):
+            L__row_inds += [far_off_points[i]] * n_repel
+            L__col_inds += far_off_points
+            p_llp = np.ones(len(far_off_points))
+            p_llp[i] = 0
+            p_llp_sum = np.sum(p_llp)
+            p_llp *= -1
+            p_llp[i] = p_llp_sum
+            L_r[i, :] = p_llp
+
+            L__vals += L_r[i, :].tolist()
+
+        L_ = csr_matrix((L__vals, (L__row_inds, L__col_inds)), shape=(n + M, n + M))
+        L_ = repel_by * L_
+        L__Lpinv_BT = L_.dot(Lpinv_BT)
+        CC -= (Lpinv_BT.T).dot(L__Lpinv_BT)
+
     return CC, Lpinv_BT, D, B
 
 
+def compute_far_off_points(d_e, n_repel):
+    far_off_points = []
+    dist_from_far_off_points = None
+    while len(far_off_points) < n_repel:
+        if len(far_off_points) == 0:
+            far_off_points = []
+            dist_from_far_off_points = np.zeros(d_e.shape[0]) + np.inf
+            while np.sum(np.isinf(dist_from_far_off_points)):
+                inf_inds = np.where(np.isinf(dist_from_far_off_points))[0]
+                np.random.shuffle(inf_inds)
+                far_off_points.append(inf_inds[0])
+                dist_from_far_off_points = np.minimum(
+                    dist_from_far_off_points,
+                    dijkstra(d_e, directed=False, indices=far_off_points[-1]),
+                )
+        else:
+            far_off_points.append(np.argmax(dist_from_far_off_points))
+            dist_from_far_off_points = np.minimum(
+                dist_from_far_off_points,
+                dijkstra(d_e, directed=False, indices=far_off_points[-1]),
+            )
+    return far_off_points
+
+
 # unscaled alignment error
-def compute_alignment_err(d, Utilde, intermed_param, verbose):
+def compute_alignment_err(d, Utilde, intermed_param, repel_by, far_off_points, verbose):
     """Compute alignment error of data in new space.
 
     Parameters
@@ -1704,7 +1855,9 @@ def compute_alignment_err(d, Utilde, intermed_param, verbose):
         Stores parameterisations for all points
     """
 
-    CC, _, _, _ = build_ortho_optim(d, Utilde, intermed_param, verbose)
+    CC, _, _, _ = build_ortho_optim(
+        d, Utilde, intermed_param, repel_by, far_off_points, verbose
+    )
     M, n = Utilde.shape
 
     CC_mask = np.tile(np.eye(d, dtype=bool), (M, M))
@@ -1739,6 +1892,95 @@ def custom_procrustes(X, Y, compute_cost=False):
 def procrustes(A, B):
     T, v = custom_procrustes(B, A)
     return T, v
+
+
+# Kunal N Chaudhury, Yuehaw Khoo, and Amit Singer, Global registration
+# of multiple point clouds using semidefinite programming
+def spectral_alignment(
+    y,
+    d,
+    Utilde,
+    C,
+    param,
+    repel_by,
+    repel_decay,
+    n_repel,
+    far_off_points,
+    seq_of_intermed_views_in_cluster=None,
+):
+    if seq_of_intermed_views_in_cluster is None:
+        seq_of_intermed_views_in_cluster = [np.arange(Utilde.shape[0])]
+    CC, Lpinv_BT, _, _ = build_ortho_optim(
+        d,
+        Utilde,
+        param,
+        far_off_points=far_off_points,
+        repel_by=repel_by,
+    )
+
+    M, n = Utilde.shape
+    n_clusters = len(seq_of_intermed_views_in_cluster)
+    CC0 = np.zeros((M * d, d))
+    # for s in range(M):
+    #     CC0[s*d:(s+1)*d,:] = intermed_param.T[s,:,:]
+    for s in range(M):
+        CC0[s * d : (s + 1) * d, :] = np.eye(d)
+    CC0 = CC0 / np.sqrt(M)
+    v0 = CC0[:, 0]
+
+    np.random.seed(42)
+    v0 = np.random.uniform(0, 1, CC.shape[0])
+    if (n_repel == 0) or (repel_by == 0):
+        # To find smallest eigenvalues, using shift-inverted algo with mode=normal and which='LM'
+        W_, V_ = scipy.sparse.linalg.eigsh(CC, k=d, v0=v0, sigma=-1e-3)
+        # W_,V_ = scipy.sparse.linalg.lobpcg(CC, CC0.T, largest=False)
+        # or just pass which='SM' without using sigma
+        # W_,V_ = scipy.sparse.linalg.eigsh(CC, k=d, v0=v0, which='SM')
+        V_, _ = svd_flip(V_, V_.T)
+    else:
+        # To find smallest eigenvalues, using shift-inverted algo with mode=normal and which='LM'
+        CC_frob = np.linalg.norm(CC)
+        W_, V_ = scipy.sparse.linalg.eigsh(CC, k=d, v0=v0, sigma=-2 * CC_frob)
+        # or just pass which='SM' without using sigma
+        # W_,V_ = scipy.sparse.linalg.eigsh(CC, k=d, v0=v0, which='SA')
+        V_, _ = svd_flip(V_, V_.T)
+
+    Wstar = np.sqrt(M) * V_.T
+    Tstar = np.zeros((d, M * d))
+    for i in range(n_clusters):
+        # the first view in each cluster is not rotated
+        seq = seq_of_intermed_views_in_cluster[i]
+        s0 = seq[0]
+        U_, S_, VT_ = scipy.linalg.svd(Wstar[:, d * s0 : d * (s0 + 1)])
+        U_, VT_ = svd_flip(U_, VT_)
+        Q = np.matmul(U_, VT_)
+        Q = Q.T
+
+        for m_ in range(len(seq)):
+            m = seq[m_]
+            U_, S_, VT_ = scipy.linalg.svd(Wstar[:, d * m : d * (m + 1)])
+            temp_ = np.matmul(U_, VT_)
+            Tstar[:, m * d : (m + 1) * d] = np.matmul(Q, temp_)
+
+    Zstar = Tstar.dot(Lpinv_BT.transpose())
+
+    # the first view in each cluster is not translated
+    for i in range(n_clusters):
+        seq = seq_of_intermed_views_in_cluster[i]
+        s0 = seq[0]
+        temp = Zstar[:, n + s0][:, None].copy()
+        Zstar[:, n + seq] -= temp
+        C_seq = C[seq, :].sum(axis=0).nonzero()[1]
+        Zstar[:, C_seq] -= temp
+
+    for s in range(M):
+        T_s = Tstar[:, s * d : (s + 1) * d].T
+        v_s = Zstar[:, n + s]
+        param.T[s, :, :] = np.matmul(param.T[s, :, :], T_s)
+        param.v[s, :] = np.matmul(param.v[s, :][np.newaxis, :], T_s) + v_s
+        C_s = C[s, :].indices
+        y[C_s, :] = param.eval_(view_index=s, data_mask=C_s)
+    return y, Zstar[:, :n].T
 
 
 def procrustes_init(
@@ -1787,9 +2029,7 @@ def procrustes_init(
         for mp in Z_s:
             Utilde_s_mp = Utilde_s.multiply(Utilde[mp, :]).nonzero()[1]
             n_Utilde_s_Z_s[Utilde_s_mp] += 1
-            mu_s[Utilde_s_mp, :] += param.eval_(
-                mp, Utilde_s_mp
-            )
+            mu_s[Utilde_s_mp, :] += param.eval_(mp, Utilde_s_mp)
 
         # Compute T_s and v_s by aligning the embedding of the overlap
         # between sth view and the views in Z_s, with the centroid mu_s
@@ -1816,28 +2056,28 @@ def add_spacing_between_clusters(y, seq_of_intermed_views_in_cluster, param, C):
     n_clusters = len(seq_of_intermed_views_in_cluster)
     if n_clusters == 1:
         return
-    
-    M,n = C.shape
-        
+
+    M, n = C.shape
+
     # arrange connected components nicely
     # spaced on horizontal (x) axis
     offset = 0
-    cluster_label = np.zeros(y.shape[0], dtype=int)-1
+    cluster_label = np.zeros(y.shape[0], dtype=int) - 1
     for i in range(n_clusters):
         seq = seq_of_intermed_views_in_cluster[i]
-        pts_in_cluster_i = np.where(C[seq,:].sum(axis=0))[1]
+        pts_in_cluster_i = np.where(C[seq, :].sum(axis=0))[1]
         cluster_label[pts_in_cluster_i] = i
         # make the x coordinate of the leftmost point
         # of the ith cluster to be equal to the offset
         if i > 0:
-            offset_ = np.min(y[pts_in_cluster_i,0])
-            param.v[seq,0] += offset - offset_
-            y[pts_in_cluster_i,0] += offset - offset_
-        
+            offset_ = np.min(y[pts_in_cluster_i, 0])
+            param.v[seq, 0] += offset - offset_
+            y[pts_in_cluster_i, 0] += offset - offset_
+
         # recompute the offset as the x coordinate of
         # rightmost point of the current cluster
-        offset = 1.25*np.max(y[pts_in_cluster_i,0])
-    
+        offset = 1.25 * np.max(y[pts_in_cluster_i, 0])
+
     return cluster_label
 
 
@@ -1899,7 +2139,11 @@ class Param:
         a one-time RuntimeWarning is emitted so the user knows they're at
         the limit.
         """
-        ks = np.asarray(view_index) if not isinstance(view_index, np.ndarray) else view_index
+        ks = (
+            np.asarray(view_index)
+            if not isinstance(view_index, np.ndarray)
+            else view_index
+        )
         masks = data_mask
         n_eval = len(ks)
         if n_eval == 0:
@@ -1956,8 +2200,8 @@ class Param:
                     X_ = X_ - np.mean(X_, axis=0)[None, :]
                     X_ = X_ / (np.std(X_, axis=0, ddof=1)[None, :] + 1e-12)
                 chunk = self.model[k].transform(X_)[None, ...]
-                ks_chunk = ks[i:i + 1]
-                masks_chunk = masks[i:i + 1]
+                ks_chunk = ks[i : i + 1]
+                masks_chunk = masks[i : i + 1]
                 chunk = self._apply_post_(ks_chunk, masks_chunk, chunk)
                 yield slice(i, i + 1), chunk
 
@@ -1969,7 +2213,9 @@ class Param:
         """
         if self.noise_var:
             np.random.seed(self.noise_seed[0])
-            temp2 = np.random.normal(0, self.noise_var, (self.X.shape[0], temp.shape[2]))
+            temp2 = np.random.normal(
+                0, self.noise_var, (self.X.shape[0], temp.shape[2])
+            )
             temp = temp + temp2[masks, :]
         if self.noise is not None:
             temp = temp + self.noise[masks]
@@ -2010,8 +2256,10 @@ class Param:
             return first_chunk
 
         # Multi-chunk path: accumulate into a pre-allocated output array.
-        out = np.empty((n_eval, first_chunk.shape[1], first_chunk.shape[2]),
-                       dtype=first_chunk.dtype)
+        out = np.empty(
+            (n_eval, first_chunk.shape[1], first_chunk.shape[2]),
+            dtype=first_chunk.dtype,
+        )
         out[first_sl] = first_chunk
         for sl, chunk in it:
             out[sl] = chunk
