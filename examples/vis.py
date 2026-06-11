@@ -2059,6 +2059,7 @@ class Visualize:
                         y[pts_on_tear, 0],
                         y[pts_on_tear, 1],
                         s=s,
+                        cmap=cmap1,
                         c=color_of_pts_on_tear[pts_on_tear],
                         vmin=None,
                         vmax=None,
