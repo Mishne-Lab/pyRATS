@@ -1389,6 +1389,7 @@ def compute_final_embedding(
     repel_by,
     repel_decay,
     far_off_points,
+    seq_of_intermed_views_in_cluster,
     verbose,
 ):
     """Align clusters via Riemannian Gradient Descent.
@@ -1502,11 +1503,15 @@ def compute_final_embedding(
         if repel_by is not None:
             repel_by *= repel_decay
 
+        labels = add_spacing_between_clusters(
+            y, seq_of_intermed_views_in_cluster, param, C
+        )
+
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu)
-        return y, Utildeg
+        return y, Utildeg, labels
 
-    return y, None
+    return y, None, labels
 
 
 def rgd_alignment(

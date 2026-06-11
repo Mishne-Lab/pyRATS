@@ -623,8 +623,12 @@ class RATS:
             self.verbose,
         )
 
+        _ = add_spacing_between_clusters(
+            y_init, self.seq_of_intermed_views_in_cluster, self.param, self.C
+        )
+
         # apply RGD
-        y_final, self.Utildeg = compute_final_embedding(
+        y_final, self.Utildeg, labels = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -641,11 +645,8 @@ class RATS:
             self.repel_by,
             self.repel_decay,
             self.far_off_points,
+            self.seq_of_intermed_views_in_cluster,
             self.verbose,
-        )
-
-        labels = add_spacing_between_clusters(
-            y_final, self.seq_of_intermed_views_in_cluster, self.param, self.C
         )
 
         return y_final, labels
