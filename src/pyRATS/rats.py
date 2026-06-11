@@ -57,7 +57,7 @@ class RATS:
     max_cluster_size : int, default=25
         Maximum allowed size of the clusters. The value must be > min_cluster_size.
 
-    tear : bool, default=True
+    tear : bool, default=False
         Whether to tear the manifold.
 
     nu : int, default=3
@@ -137,7 +137,7 @@ class RATS:
         postprocess=True,
         min_cluster_size=5,
         max_cluster_size=25,
-        tear=True,
+        tear=False,
         nu=3,
         align_w_parent_only=True,
         tree="mst",
