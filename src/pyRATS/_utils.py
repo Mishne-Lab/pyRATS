@@ -1385,7 +1385,6 @@ def compute_final_embedding(
     tol,
     nu,
     k,
-    metric,
     alpha,
     repel_by,
     repel_decay,
@@ -1465,7 +1464,7 @@ def compute_final_embedding(
     ):
 
         if to_tear:
-            Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
+            Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu)
             Utilde_t = Utildeg.multiply(Utilde)
             Utilde_t.eliminate_zeros()
 
@@ -1504,7 +1503,7 @@ def compute_final_embedding(
             repel_by *= repel_decay
 
     if to_tear:
-        Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu, metric)
+        Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu)
         return y, Utildeg
 
     return y, None

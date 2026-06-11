@@ -324,18 +324,18 @@ class RATS:
         # Construct intermediate views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Clustering intermediate views...")
-        c, n_C = self._fit_intermediate_views()
+        n_C = self._fit_intermediate_views()
         current_step += 1
 
         # Construct Global views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
-        y, labels = self._fit_global_views(c, n_C)
+        y, labels = self._fit_global_views(n_C)
         if labels is not None:
             return y, labels
         return y
 
-    def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[0, 1, 2]):
+    def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[1]):
         """Compute glueing instructions for the tear.
 
         Parameters
@@ -567,16 +567,13 @@ class RATS:
         self.C = C
         self.c = c
 
-        return c, n_C
+        return n_C
 
-    def _fit_global_views(self, c, n_C):
+    def _fit_global_views(self, n_C):
         """Align intermediate clusters via Riemannian gradient descent.
 
         Parameters
         ----------
-        c : array-like, shape (n_samples)
-            Holds the cluster index for each datapoint.
-
         n_C: array-like, shape (n_clusters)
             Holds the number of datapoints per cluster.
 
@@ -592,7 +589,7 @@ class RATS:
         self.n_Utilde_Utilde = n_Utilde_Utilde
 
         # Compute sequence of intermedieate views
-        seq_of_intermed_views_in_cluster, parents_of_intermed_views_in_cluster, _ = (
+        self.seq_of_intermed_views_in_cluster, parents_of_intermed_views_in_cluster, _ = (
             compute_seq_of_views(
                 self.d,
                 self.Utilde,
@@ -608,12 +605,12 @@ class RATS:
         )
 
         # Compute initial embedding
-        y_init, far_off_points = compute_init_embedding(
+        y_init, self.far_off_points = compute_init_embedding(
             self.d,
             self.neighborhood_graph_sym,
             self.Utilde,
             self.param,
-            seq_of_intermed_views_in_cluster,
+            self.seq_of_intermed_views_in_cluster,
             parents_of_intermed_views_in_cluster,
             self.C,
             self.to_tear,
@@ -627,7 +624,7 @@ class RATS:
         )
 
         # apply RGD
-        y_final, Utildeg = compute_final_embedding(
+        y_final, self.Utildeg = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -640,19 +637,16 @@ class RATS:
             self.tol,
             self.nu,
             self.k,
-            self.metric,
             self.alpha,
             self.repel_by,
             self.repel_decay,
-            far_off_points,
+            self.far_off_points,
             self.verbose,
         )
 
         labels = add_spacing_between_clusters(
-            y_final, seq_of_intermed_views_in_cluster, self.param, self.C
+            y_final, self.seq_of_intermed_views_in_cluster, self.param, self.C
         )
-
-        self.Utildeg = Utildeg
 
         return y_final, labels
 
