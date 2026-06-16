@@ -98,17 +98,14 @@ class CutAndPaste:
         self,
         model,
         y,
-        color_of_pts_on_tear,
         metadata_fname=None,
         save_progress_dir="",
         cmap_interior="summer",
         cmap_tear="jet",
+        tear_color_eig_inds=[5, 1, 2],
         max_refinement_iter=10,
         force_compute=False,
     ):
-        self.model = model
-        self.y = y
-        self.color_of_pts_on_tear = color_of_pts_on_tear
         self.pts = None
         if metadata_fname is None:
             self.metadata = []
@@ -118,8 +115,12 @@ class CutAndPaste:
         if self.save_progress_dir:
             makedirs(self.save_progress_dir)
         self.cur_iter = 0
+
+        self.model = model
+        self.y = y
         self.cmap_interior = cmap_interior
         self.cmap_tear = cmap_tear
+        self.tear_color_eig_inds = tear_color_eig_inds
         self.max_refinement_iter = max_refinement_iter
         self.force_compute = force_compute
         self.selected_pts_to_move = np.array([])
@@ -136,19 +137,18 @@ class CutAndPaste:
 
     def get_current_embedding_data(self):
         y = self.y.copy()
-        color_of_pts_on_tear = self.color_of_pts_on_tear.copy()
+        color_of_pts_on_tear = self.model.compute_color_of_pts_on_tear(y, self.tear_color_eig_inds)
         cmap_interior = self.cmap_interior
         cmap_tear = self.cmap_tear
 
         matplotlib.use("Agg")
-        color_of_pts_on_tear = self.color_of_pts_on_tear
         pts_on_tear = ~np.isnan(color_of_pts_on_tear[:, -1])
 
         interior_handle, tear_handle = vis.Visualize().global_embedding_for_gui(
             y,
             y[:, 0],
             cmap0=cmap_interior,
-            color_of_pts_on_tear=color_of_pts_on_tear[:, -1],
+            color_of_pts_on_tear=color_of_pts_on_tear[:, self.tear_color_eig_inds],
             cmap1=cmap_tear,
             set_title=True,
             figsize=(3, 3),
@@ -278,12 +278,12 @@ class CutAndPaste:
         )
         self.color_of_pts_on_tear = model.compute_color_of_pts_on_tear(self.y)
 
-        self.save_buml_obj(
-            "buml_obj_and_metadata_after_iter=" + str(self.cur_iter) + ".dat",
+        self.save_model(
+            "model_and_metadata_after_iter=" + str(self.cur_iter) + ".dat",
         )
         self.cur_iter += 1
 
-    def save_buml_obj(self, fname):
+    def save_model(self, fname):
         if self.save_progress_dir:
             new_emb_info = {
                 "y": self.y,
@@ -339,8 +339,11 @@ def get_convex_covering_polygon(y):
 
 # APP itself
 ###############################################################
+from datetime import datetime
 
-REG_TEAR_TAG = "reg_tear"
+# Format as YYYY-MM-DD HH:MM:SS
+string_format = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+REG_TEAR_TAG = "reg_tear_" + string_format
 
 # Spinner using CSS
 ################################################################
@@ -454,7 +457,7 @@ algo_input = TextInput(title="Algorithm Name: (for ex: rats)", value="rats")
 hyp_param_input = TextInput(title="Hyperparameter: (for ex: 28_5)", value="28_5")
 options_input = TextAreaInput(
     title="Additional options:",
-    value="{'force_compute': True, 'max_refinement_iter': 10, 'cmap_interior': 'summer', 'cmap_tear': 'jet'}",
+    value="{'force_compute': True, 'max_refinement_iter': 10, 'cmap_interior': 'summer', 'cmap_tear': 'jet', 'tear_color_eig_inds': [5, 1, 2]}",
     rows=5,
 )
 
@@ -478,6 +481,7 @@ rotate_ccw_button = Button(
 )
 
 source = ColumnDataSource(data=dict(x=[], y=[], color=[]))
+cluster_patches_source = ColumnDataSource(data=dict(xs=[], ys=[]))
 patch_source = ColumnDataSource(data=dict(x=[], y=[]))
 
 MAX_FIG_HEIGHT = 900
@@ -500,22 +504,22 @@ fig.patch("x", "y", source=patch_source, alpha=0.4, line_width=2, color="orange"
 # Adjust figure size using the scatter x and y coordinates
 ##############################################################################
 def adjust_figure_size():
-    print(source.data, source)
-    x_min = 1.25 * np.min(source.data["x"])
-    x_max = 1.25 * np.max(source.data["x"])
-    y_min = 1.25 * np.min(source.data["y"])
-    y_max = 1.25 * np.max(source.data["y"])
+    scale = 2
+    x_min = scale * np.min(source.data["x"])
+    x_max = scale * np.max(source.data["x"])
+    y_min = scale * np.min(source.data["y"])
+    y_max = scale * np.max(source.data["y"])
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     print("Aspect ratio (x/y) of the embedding: " + str(aspect_ratio))
     print("Adjusting figure width based on the aspect ratio.")
     print("MAX_FIG_WIDTH = " + str(MAX_FIG_WIDTH))
     print("MAX_FIG_HEIGHT = " + str(MAX_FIG_HEIGHT))
     if aspect_ratio >= 1:
-        fig.height = int(1.25 * MAX_FIG_WIDTH / aspect_ratio)
-        fig.width = int(1.25 * MAX_FIG_WIDTH)
+        fig.height = int(scale * MAX_FIG_WIDTH / aspect_ratio)
+        fig.width = int(scale * MAX_FIG_WIDTH)
     else:
-        fig.height = int(1.25 * MAX_FIG_HEIGHT)
-        fig.width = int(1.25 * aspect_ratio * MAX_FIG_HEIGHT)
+        fig.height = int(scale * MAX_FIG_HEIGHT)
+        fig.width = int(scale * aspect_ratio * MAX_FIG_HEIGHT)
 
     fig.x_range = Range1d(x_min, x_max, bounds=(x_min, x_max))
     fig.y_range = Range1d(y_min, y_max, bounds=(y_min, y_max))
@@ -670,24 +674,24 @@ def start_main():
     gen_data_path = gen_data_path_input.value.strip()
     algo = algo_input.value.strip()
     hyp_param = hyp_param_input.value.strip()
-    buml_obj_info_path = (
+    model_info_path = (
         gen_data_path + "/" + algo + "/" + hyp_param + "/" + algo + ".dat"
     )
     save_dir = gen_data_path + "/" + algo + "/" + hyp_param + "_" + REG_TEAR_TAG
     options = process_additional_options()
-    print("buml_obj_info_path=" + buml_obj_info_path)
+    print("model_info_path=" + model_info_path)
     print("save_dir=" + save_dir)
     global cut_and_paste_obj
-    emb_info, metadata = read(buml_obj_info_path)
+    emb_info, metadata = read(model_info_path)
     cut_and_paste_obj = CutAndPaste(
         model=emb_info["model"],
         y=emb_info["y"],
-        color_of_pts_on_tear=emb_info["color_of_pts_on_tear"],
         save_progress_dir=save_dir,
         max_refinement_iter=options["max_refinement_iter"],
         force_compute=options["force_compute"],
         cmap_interior=options["cmap_interior"],
         cmap_tear=options["cmap_tear"],
+        tear_color_eig_inds=options["tear_color_eig_inds"]
     )
     source.data = cut_and_paste_obj.get_current_embedding_data()
 
@@ -800,7 +804,7 @@ paste_button.on_click(on_paste_button_click)
 def save_():
     algo = algo_input.value.strip()
     global cut_and_paste_obj
-    cut_and_paste_obj.save_buml_obj(algo + ".dat")
+    cut_and_paste_obj.save_model(algo + ".dat")
 
 
 def on_save_button_click():
