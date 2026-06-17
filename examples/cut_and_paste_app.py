@@ -5,6 +5,7 @@
 from bokeh.plotting import figure, curdoc
 from bokeh.models import (
     LassoSelectTool,
+    PolySelectTool,
     TapTool,
     TextInput,
     Button,
@@ -31,7 +32,6 @@ import pickle
 from scipy.spatial import ConvexHull
 import vis
 from vis import maximize_window
-
 
 from pyRATS._utils import (
     procrustes,
@@ -98,7 +98,7 @@ class CutAndPaste:
         self,
         model,
         y,
-        metadata_fname=None,
+        metadata_fpath=None,
         save_progress_dir="",
         cmap_interior="summer",
         cmap_tear="jet",
@@ -107,10 +107,10 @@ class CutAndPaste:
         force_compute=False,
     ):
         self.pts = None
-        if metadata_fname is None:
+        if metadata_fpath is None:
             self.metadata = []
         else:
-            self.metadata = read(metadata_fname)
+            _, self.metadata = read(metadata_fpath)
         self.save_progress_dir = save_progress_dir
         if self.save_progress_dir:
             makedirs(self.save_progress_dir)
@@ -124,6 +124,15 @@ class CutAndPaste:
         self.max_refinement_iter = max_refinement_iter
         self.force_compute = force_compute
         self.selected_pts_to_move = np.array([])
+
+        if len(self.metadata) > 0:
+            # simulate cut and paste
+            print('Simulating cut and paste for', len(self.metadata), 'iterations using previously stored metadata.')
+            _ = self.get_current_embedding_data()
+            for i in range(len(self.metadata)):
+                self.cut_clusters_to_move(None)
+                self.paste_clusters(None)
+
 
     def init_metadata_for_current_iter(self):
         if len(self.metadata) <= self.cur_iter:
@@ -152,14 +161,14 @@ class CutAndPaste:
             cmap1=cmap_tear,
             set_title=True,
             figsize=(3, 3),
-            s=20,
+            s=40,
         )
         if self.save_progress_dir:
             save_fn = (
                 self.save_progress_dir
                 + "/reg_tear_y_at_iter="
                 + str(self.cur_iter)
-                + ".png"
+                + ".eps"
             )
             plt.savefig(save_fn, bbox_inches="tight", dpi=400)
 
@@ -234,6 +243,7 @@ class CutAndPaste:
         selected_cluster_mask = self.metadata[self.cur_iter]["selected_cluster_mask"]
         points_in_selected_clusters = selected_cluster_mask[self.model.c]
         y = self.y.copy()
+        
         y_new = self.recompute_embedding(
             y,
             points_in_selected_clusters,
@@ -309,7 +319,7 @@ class CutAndPaste:
         )
         return y
 
-    def save_polygon(self, y, y_face_color, y_polyg, stage, s=20):
+    def save_polygon(self, y, y_face_color, y_polyg, stage, s=40):
         assert stage in ["init", "final"]
         matplotlib.use("Agg")
         _, ax = plt.subplots()
@@ -320,16 +330,16 @@ class CutAndPaste:
         plt.axis("image")
         plt.axis("off")
         plt.tight_layout()
-        ax.set_rasterized(True)
         save_fn = (
             self.save_progress_dir
             + "/"
             + stage
             + "_polyg_at_iter="
             + str(self.cur_iter)
-            + ".png"
+            + ".eps"
         )
         plt.savefig(save_fn, bbox_inches="tight", dpi=400)
+        ax.set_rasterized(True)
 
 
 def get_convex_covering_polygon(y):
@@ -449,21 +459,26 @@ print_main_log("Input algorithm, hyperparameter and options, and then press star
 ################################################################
 gen_data_path_input = TextInput(
     title="Generated data path",
-    value="/Users/joshuaoffergeld/Documents/pyRATS/examples",
+    value="/data2/dhruv/RATS_code/RATS/code/R2OFday1/notebooks/generated_data/",
+    width=550,
+)
+cut_and_paste_metadata_path_input = TextInput(
+    title="Cut and paste metadata path (leave it blank if running for the first time)",
+    value="/data2/dhruv/RATS_code/RATS/code/R2OFday1/notebooks/generated_data/rats_mishnelab/34_3_reg_tear_2026-06-16 15:04:51/model_and_metadata_after_iter=1.dat",
     width=550,
 )
 
-algo_input = TextInput(title="Algorithm Name: (for ex: rats)", value="rats")
-hyp_param_input = TextInput(title="Hyperparameter: (for ex: 28_5)", value="28_5")
+algo_input = TextInput(title="Algorithm Name: (for ex: rats)", value="rats_mishnelab")
+hyp_param_input = TextInput(title="Hyperparameter: (for ex: 28_5)", value="34_3")
 options_input = TextAreaInput(
     title="Additional options:",
-    value="{'force_compute': True, 'max_refinement_iter': 10, 'cmap_interior': 'summer', 'cmap_tear': 'jet', 'tear_color_eig_inds': [5, 1, 2]}",
+    value="{'force_compute': False, 'max_refinement_iter': 10, 'cmap_interior': 'summer', 'cmap_tear': 'jet', 'tear_color_eig_inds': [5, 2, 3]}",
     rows=5,
 )
 
 cut_and_paste_obj = None
 rot_deg = 5
-lasso_tool = LassoSelectTool()
+select_tool = PolySelectTool()
 tap_tool = TapTool()
 
 update_max_fig_height_button = Button(
@@ -484,13 +499,13 @@ source = ColumnDataSource(data=dict(x=[], y=[], color=[]))
 cluster_patches_source = ColumnDataSource(data=dict(xs=[], ys=[]))
 patch_source = ColumnDataSource(data=dict(x=[], y=[]))
 
-MAX_FIG_HEIGHT = 900
-MAX_FIG_WIDTH = 900
+MAX_FIG_HEIGHT = 200
+MAX_FIG_WIDTH = 200
 
 max_fig_height_input = TextInput(title="Max figure height", value=str(MAX_FIG_HEIGHT))
 fig = figure(
     title="Cut & Paste operation on the embedding",
-    tools=[lasso_tool],
+    tools=[select_tool],
     x_axis_label="x",
     y_axis_label="y",
     width=MAX_FIG_HEIGHT,
@@ -672,20 +687,30 @@ def read(fpath, verbose=True):
 
 def start_main():
     gen_data_path = gen_data_path_input.value.strip()
+    cut_and_paste_metadata_path = cut_and_paste_metadata_path_input.value.strip()
     algo = algo_input.value.strip()
     hyp_param = hyp_param_input.value.strip()
     model_info_path = (
         gen_data_path + "/" + algo + "/" + hyp_param + "/" + algo + ".dat"
     )
-    save_dir = gen_data_path + "/" + algo + "/" + hyp_param + "_" + REG_TEAR_TAG
+    if cut_and_paste_metadata_path != "":
+        print("cut_and_paste_metadata_path=" + cut_and_paste_metadata_path)
+        save_dir = gen_data_path + "/" + algo + "/" + cut_and_paste_metadata_path.split('/')[-2]
+    else:
+        cut_and_paste_metadata_path = None
+        save_dir = gen_data_path + "/" + algo + "/" + hyp_param + "_" + REG_TEAR_TAG
+
     options = process_additional_options()
     print("model_info_path=" + model_info_path)
     print("save_dir=" + save_dir)
     global cut_and_paste_obj
     emb_info, metadata = read(model_info_path)
+    
+
     cut_and_paste_obj = CutAndPaste(
         model=emb_info["model"],
         y=emb_info["y"],
+        metadata_fpath=cut_and_paste_metadata_path,
         save_progress_dir=save_dir,
         max_refinement_iter=options["max_refinement_iter"],
         force_compute=options["force_compute"],
@@ -702,8 +727,9 @@ def start_end():
     cut_button.disabled = False
     update_max_fig_height_button.disabled = False
     fig.toolbar.active_inspect = None
-    fig.toolbar.active_drag = lasso_tool
-    print_main_log("Select region to cut using lasso and then press cut.")
+    #fig.toolbar.active_drag = select_tool
+    fig.toolbar.active_tap = select_tool
+    print_main_log("Select polygonal region to cut (tap at a location to add a vertex), press Enter/Esc to finish selection and then press cut button.")
 
 
 def start():
@@ -725,13 +751,16 @@ start_button.on_click(on_start_button_click)
 # Cut
 #######################################
 def cut_start():
-    fig.toolbar.active_drag = None
+    #fig.toolbar.active_drag = None
+    fig.toolbar.active_tap = None
     cut_button.disabled = True
     save_button.disabled = True
 
 
 def cut_main():
     global cut_and_paste_obj
+    print(source.selected.indices)
+    print(len(source.selected.indices))
     patch_source.data = cut_and_paste_obj.cut_clusters_to_move(source.selected.indices)
     source.selected.indices = cut_and_paste_obj.selected_pts_to_move.tolist()
     print("len(source.selected.indices) = " + str(len(source.selected.indices)))
@@ -772,7 +801,8 @@ def paste_end():
     cut_button.disabled = False
     save_button.disabled = False
     patch_source.data = dict(x=[], y=[])
-    fig.toolbar.active_drag = lasso_tool
+    #fig.toolbar.active_drag = select_tool
+    fig.toolbar.active_tap = select_tool
 
 
 def paste_main():
@@ -837,6 +867,7 @@ curdoc().add_root(
     column(
         main_log_div,
         row(gen_data_path_input),
+        row(cut_and_paste_metadata_path_input),
         row(algo_input, hyp_param_input, options_input, max_fig_height_input),
         row(
             update_max_fig_height_button,
