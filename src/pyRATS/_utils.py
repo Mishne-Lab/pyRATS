@@ -63,8 +63,10 @@ def _cgroup_available_bytes():
     return None
 
 
+from typing import Optional
+
 _MEMORY_CACHE_TTL = 0.25  # seconds — fresh enough to track fit-phase allocations
-_memory_cache: tuple[float, int] | None = None  # (timestamp, bytes)
+_memory_cache: Optional[tuple[float, int]] = None  # (timestamp, bytes)
 
 
 def _available_memory_bytes():
