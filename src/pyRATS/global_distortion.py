@@ -3,7 +3,12 @@ from scipy.sparse.csgraph import shortest_path
 from sklearn.neighbors import NearestNeighbors
 from pyRATS._tear_coloring import compute_tear_graph
 import numpy as np
+from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
+import sys
+
+sys.path.insert(0, "/Users/joshuaoffergeld/Documents/pyRATS")
+from examples import vis
 
 
 def _shortest_paths(
@@ -106,7 +111,7 @@ def _add_weights_to_tear_graph(
             # for view_ind in view_cont_pts_across_tear[(edge_i, edge_j)]:
             for view_ind in [cluster_label[edge_i], cluster_label[edge_j]]:
                 local_coords = param.eval_(
-                    {"data_mask": [edge_i, edge_j], "view_index": view_ind}
+                    data_mask=[edge_i, edge_j], view_index=view_ind
                 )
                 temp[k - start_ind] = min(
                     temp[k - start_ind],
@@ -262,7 +267,7 @@ def compute_global_distortion(
 
     emb_dist = _shortest_paths(y, n_nbrs)
 
-    if model.to_tear:
+    if hasattr(model, "to_tear") and model.to_tear:
         emb_dist = _compute_tear_aware_shortest_path_distances(
             model.param,
             y,
@@ -280,3 +285,28 @@ def compute_global_distortion(
         )
 
     return _compute_distortion_at(emb_dist, gt_dist)
+
+def find_best_hyperparams(
+    dist_ats,
+):
+
+    best_hyp_param = {}
+    for algo in dist_ats:
+        hyp_params = list(dist_ats[algo].keys())
+        if len(hyp_params) == 0:
+            continue
+        max_dist_at = np.max(np.array(list(dist_ats[algo].values())), axis=1)
+        if len(max_dist_at) == 0:
+            print(
+                "Max of distortion distributions are possibly infinity across hyperparameters for",
+                algo,
+            )
+            continue
+        i = np.nanargmin(max_dist_at)
+        best_hyp_param[algo] = hyp_params[i]
+
+    dist_dict = {}
+    for algo in best_hyp_param:
+        dist_dict[algo] = {algo: dist_ats[algo][best_hyp_param[algo]]}
+
+    return best_hyp_param
