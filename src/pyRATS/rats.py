@@ -552,7 +552,7 @@ class RATS:
                 self.param.model = self.param.model[non_empty_C]
 
             Utilde = C.dot(self.U)
-            Utilde.sort_indices() # determinism
+            # Utilde.sort_indices() # determinism
 
             np.random.seed(42)
             self.param.noise_seed = np.random.randint(M * M, size=M)
@@ -587,7 +587,7 @@ class RATS:
         # Compute |Utilde_{mm'}|
         n_Utilde_Utilde = self.Utilde.dot(self.Utilde.transpose())
         n_Utilde_Utilde.setdiag(0)
-        n_Utilde_Utilde.sort_indices() # determinism
+        # n_Utilde_Utilde.sort_indices() # determinism
         self.n_Utilde_Utilde = n_Utilde_Utilde
 
         # Compute sequence of intermedieate views
