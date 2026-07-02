@@ -16,9 +16,10 @@ from pyRATS._utils import (
     compute_init_embedding,
     compute_final_embedding,
     batched_pdist,
+    add_spacing_between_clusters,
+    induce_connections,
 )
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
-
 
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
 
@@ -56,17 +57,28 @@ class RATS:
     max_cluster_size : int, default=25
         Maximum allowed size of the clusters. The value must be > min_cluster_size.
 
-    tear : bool, default=True
+    tear : bool, default=False
         Whether to tear the manifold.
 
     nu : int, default=3
         The ratio of the size of local views in the embedding against those in the data.
 
-    n_iter : int, default=20
-        Number of outer iterations to refine the global embedding.
-        Riemannian gradient descent runs for n_iter * n_iter_inner total steps.
-        For every iteration the alignment of points in the embedding is recomputed
-        and the tear is re-evaluated if tear=True.
+    align_w_parent_only : bool, default=True
+        If True, then aligns child views the parent views only
+        in the spanning-tree-based-procrustes alignment.
+
+    tree : str, default='mst'
+        Type of spanning tree to use. Options are: spt, mst (default).
+
+    root_view : str, default='center'
+        Options are: ['center', 'largest']
+        If 'center' then uses center of spanning tree as root view
+        otherwise uses the view associated with largest cluster.
+
+    max_iter : int
+        Number of iterations to refine the global embedding.
+        In total Riemannian gradient descent is run for max_iter * max_internal_iter iterations.
+        For every iteration in max_iter, the alignment of points in the embedding is recomputed and the tear is re-evaluated if to_tear=True.
 
     n_iter_inner : int, default=100
         Number of internal iterations used by Riemannian Gradient Descent per outer step.
@@ -83,8 +95,7 @@ class RATS:
         relative change in the size of the tear.
 
     metric : str, default='euclidean'
-        To be added in future releases. Metric assumed on the embedding.
-        Currently only 'euclidean' is supported.
+        Metric assumed on the embedding.
 
     fit_inverse_transform : bool, default=False
         To be added in future releases. If True, computes the inverse of the embedding
@@ -126,15 +137,22 @@ class RATS:
         postprocess=True,
         min_cluster_size=5,
         max_cluster_size=25,
-        tear=True,
+        tear=False,
         nu=3,
+        align_w_parent_only=True,
+        tree="mst",
+        root_view="center",
         n_iter=20,
         n_iter_inner=100,
         alpha=0.3,
         eps=1e-8,
         n_iter_without_progress=5,
         tol=1e-2,
+        repel_by=0.0,
+        repel_decay=1.0,
+        n_repel=0.0,
         n_forced_clusters=1,
+        global_init_algo_name="procrustes",
         verbose=False,
         n_jobs=-1,
         **kwargs,
@@ -240,11 +258,16 @@ class RATS:
         self.eta_min, self.eta_max = min_cluster_size, max_cluster_size
         self.to_tear = tear
         self.nu = nu
+        self.align_w_parent_only = align_w_parent_only
+        self.tree = tree
+        self.root_view = root_view
         self.max_iter, self.max_internal_iter = n_iter, n_iter_inner
         self.alpha, self.eps = alpha, eps
         self.patience, self.tol = n_iter_without_progress, tol
         self.metric = metric
+        self.repel_by, self.repel_decay, self.n_repel = repel_by, repel_decay, n_repel
         self.n_forced_clusters = n_forced_clusters
+        self.global_init_algo_name = global_init_algo_name
 
         if self.patience is None:
             self.patience = self.max_iter
@@ -263,13 +286,15 @@ class RATS:
             )
             self.n_jobs = cores
 
-    def fit_transform(self, X):
+    def fit_transform(self, X, condition_num=None):
         """Fit the model on the data in X, and transform X.
 
         Parameters
         ---------
         X : array-like, shape (n_samples, n_features)
             Sample data, in the form of a numpy array of shape (n_samples, n_features).
+
+        condition_num :
 
         Returns
         -------
@@ -281,7 +306,7 @@ class RATS:
 
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Fitting neighborhood graph...")
-        self._fit_nbrhd_graph(X)
+        self._fit_nbrhd_graph(X, condition_num)
         current_step += 1
 
         # Construct low dimensional local views
@@ -299,17 +324,18 @@ class RATS:
         # Construct intermediate views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Clustering intermediate views...")
-        c, n_C = self._fit_intermediate_views()
+        n_C = self._fit_intermediate_views()
         current_step += 1
 
         # Construct Global views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
-        y = self._fit_global_views(c, n_C)
-
+        y, labels = self._fit_global_views(n_C)
+        if labels is not None:
+            return y, labels
         return y
 
-    def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[0, 1, 2]):
+    def compute_color_of_pts_on_tear(self, y, tear_color_eig_inds=[1]):
         """Compute glueing instructions for the tear.
 
         Parameters
@@ -338,7 +364,7 @@ class RATS:
             tear_color_eig_inds,
             self.k,
             self.nu,
-            self.metric,
+            "euclidean",
             self.verbose,
             self.n_jobs,
             self.Utildeg,
@@ -390,18 +416,17 @@ class RATS:
         X : array-like, shape (n_samples, n_features)
             Points in the original space.
         """
-        raise NotImplementedError(
-            "inverse_transform() is not yet implemented."
-        )
+        raise NotImplementedError("inverse_transform() is not yet implemented.")
 
-
-    def _fit_nbrhd_graph(self, X, sort_results=True):
+    def _fit_nbrhd_graph(self, X, condition_num=None, sort_results=True):
         """Fitting the neighborhood graph.
 
         Parameters
         ----------
         X : array shape (n_samples, n_features)
             A 2d array containing data representing a manifold.
+
+        condition_num :
 
         sort_results: bool, default=True
             If True, sorts neighbors by index in ascending order for deterministic behavior.
@@ -411,6 +436,17 @@ class RATS:
         self.neigh_dist, self.neigh_ind = nearest_neighbors(
             X, self.k_nn0, self.metric, sort_results, self.n_jobs
         )
+
+        if condition_num is not None:
+            self.neigh_dist, self.neigh_ind, self.k_nn0 = induce_connections(
+                X,
+                self.metric,
+                condition_num,
+                self.neigh_ind,
+                self.neigh_dist,
+                self.k_nn0,
+            )
+            self.k = self.k_nn0
 
         self.U = sparse_matrix(  # needed for distortion cost_fn
             self.neigh_ind[:, : self.k], np.ones((len(X), self.k), dtype=bool)
@@ -516,6 +552,7 @@ class RATS:
                 self.param.model = self.param.model[non_empty_C]
 
             Utilde = C.dot(self.U)
+            Utilde.sort_indices() # determinism
 
             np.random.seed(42)
             self.param.noise_seed = np.random.randint(M * M, size=M)
@@ -531,16 +568,13 @@ class RATS:
         self.C = C
         self.c = c
 
-        return c, n_C
+        return n_C
 
-    def _fit_global_views(self, c, n_C):
+    def _fit_global_views(self, n_C):
         """Align intermediate clusters via Riemannian gradient descent.
 
         Parameters
         ----------
-        c : array-like, shape (n_samples)
-            Holds the cluster index for each datapoint.
-
         n_C: array-like, shape (n_clusters)
             Holds the number of datapoints per cluster.
 
@@ -553,34 +587,50 @@ class RATS:
         # Compute |Utilde_{mm'}|
         n_Utilde_Utilde = self.Utilde.dot(self.Utilde.transpose())
         n_Utilde_Utilde.setdiag(0)
+        n_Utilde_Utilde.sort_indices() # determinism
         self.n_Utilde_Utilde = n_Utilde_Utilde
 
         # Compute sequence of intermedieate views
-        seq_of_intermed_views_in_cluster, parents_of_intermed_views_in_cluster, _ = (
+        self.seq_of_intermed_views_in_cluster, parents_of_intermed_views_in_cluster, _ = (
             compute_seq_of_views(
                 self.d,
                 self.Utilde,
+                n_C,
                 n_Utilde_Utilde,
                 self.param,
                 self.n_forced_clusters,
+                self.tree,
+                self.root_view,
                 self.verbose,
                 self.n_jobs,
             )
         )
 
         # Compute initial embedding
-        y_init = compute_init_embedding(
+        y_init, self.far_off_points = compute_init_embedding(
             self.d,
+            self.neighborhood_graph_sym,
             self.Utilde,
             self.param,
-            seq_of_intermed_views_in_cluster,
+            self.seq_of_intermed_views_in_cluster,
             parents_of_intermed_views_in_cluster,
             self.C,
+            self.to_tear,
+            self.align_w_parent_only,
+            self.n_Utilde_Utilde,
+            self.repel_by,
+            self.repel_decay,
+            self.n_repel,
+            self.global_init_algo_name,
             self.verbose,
         )
 
+        _ = add_spacing_between_clusters(
+            y_init, self.seq_of_intermed_views_in_cluster, self.param, self.C
+        )
+
         # apply RGD
-        y_final, Utildeg = compute_final_embedding(
+        y_final, self.Utildeg, labels = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -593,13 +643,15 @@ class RATS:
             self.tol,
             self.nu,
             self.k,
-            self.metric,
             self.alpha,
+            self.repel_by,
+            self.repel_decay,
+            self.far_off_points,
+            self.seq_of_intermed_views_in_cluster,
             self.verbose,
         )
-        self.Utildeg = Utildeg
 
-        return y_final
+        return y_final, labels
 
     def _postprocess(self):
         """Replace high local distortion incuring parameterizations by those of neighboring points."""
@@ -628,19 +680,20 @@ class RATS:
         zeta = np.empty(n)
         view_idx = np.arange(n, dtype=int)
         masks_init = self.U.indices.reshape(n, self.k)
-        for sl, chunk in self.param.iter_eval_(view_idx, masks_init,
-                                               peak_bytes_per_row=pdist_per_row):
+        for sl, chunk in self.param.iter_eval_(
+            view_idx, masks_init, peak_bytes_per_row=pdist_per_row
+        ):
             chunk_dists = batched_pdist(chunk)
             chunk_orig = original_dists[sl]
             dlc = np.divide(
-                chunk_dists, chunk_orig,
+                chunk_dists,
+                chunk_orig,
                 out=np.full_like(chunk_dists, np.nan),
                 where=chunk_orig != 0,
             )
             zeta[sl] = np.nanmax(dlc, axis=1) / (np.nanmin(dlc, axis=1) + 1e-12)
 
         self.param.zeta = zeta
-
 
         connectivity_matrix = self.U.indices.reshape(n, -1)
         future_use_phi_of = np.arange(n, dtype=int)
@@ -653,9 +706,8 @@ class RATS:
         while len(param_changed) > 0:
             changed_mask = np.zeros(n, dtype=bool)
             changed_mask[param_changed] = True
-            reconsider_mask = (
-                changed_mask[connectivity_matrix]
-                & (connectivity_matrix != np.arange(n)[:, None])
+            reconsider_mask = changed_mask[connectivity_matrix] & (
+                connectivity_matrix != np.arange(n)[:, None]
             )
 
             zeta_min = np.full(n, np.inf)
@@ -680,7 +732,8 @@ class RATS:
                     chunk_dists = batched_pdist(chunk)
                     chunk_orig = batch_original_dists[sl]
                     dlc = np.divide(
-                        chunk_dists, chunk_orig,
+                        chunk_dists,
+                        chunk_orig,
                         out=np.full_like(chunk_dists, np.nan),
                         where=chunk_orig != 0,
                     )
@@ -698,7 +751,6 @@ class RATS:
                 connectivity_matrix[param_changed, best_col[param_changed]]
             ]
             zeta = np.minimum(zeta, zeta_min)
-
             if self.verbose:
                 pbar.update(n - len(param_changed) - pbar.n)
 

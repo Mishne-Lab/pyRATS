@@ -779,9 +779,7 @@ class Visualize:
             local_means = []
             for k in dist_dict.keys():
                 if log_scale:
-                    data = pd.DataFrame(dist_dict[k]).map(
-                        lambda x: np.log(x)
-                    )  # pd.DataFrame(dist_dict[k]).applymap(lambda x: np.log(x))
+                    data = pd.DataFrame(dist_dict[k]).map(np.log)
                 else:
                     data = pd.DataFrame(dist_dict[k])
                 parts = ax.violinplot(
@@ -897,7 +895,7 @@ class Visualize:
     ):
         fig = plt.figure(figsize=figsize)
         if log_scale:
-            sns.violinplot(data=pd.DataFrame(dist_dict).applymap(lambda x: np.log(x)))
+            sns.violinplot(data=pd.DataFrame(dist_dict).map(np.log))
             plt.ylabel(r"$\log(D_k)$")
             plt.title(r"Violinplot for $\log(D_k)$")
         else:
@@ -1570,11 +1568,8 @@ class Visualize:
                 [0, 100], [dlocal_scales[Psitilde_i[m, 0], Psitilde_i[m, 1]]] * 2, "r-"
             )
             ax[5].set_xlabel("percentiles")
-            ax[5].set_title(
-                r"$\\log(\\gamma_{%di}\\sqrt{\\widetilde{A}_{%dii}} / \
-                      \\gamma_{%dj}\\sqrt{\\widetilde{A}_{%djj}}+1)$"
-                % (k, k, k, k)
-            )
+            ax[5].set_title(r"$\\log(\\gamma_{%di}\\sqrt{\\widetilde{A}_{%dii}} / \
+                      \\gamma_{%dj}\\sqrt{\\widetilde{A}_{%djj}}+1)$" % (k, k, k, k))
 
             fig.canvas.draw()
             fig.canvas.flush_events()
@@ -1726,10 +1721,8 @@ class Visualize:
                 vert=False,
                 patch_artist=True,
             )
-            ax[5].set_title(
-                r"$\\log(\\gamma_{ki_1}\\sqrt{\\widetilde{A}_{ki_1i_1}} / \
-                      \\gamma_{ki_2}\\sqrt{\\widetilde{A}_{ki_2i_2}}+1)$"
-            )
+            ax[5].set_title(r"$\\log(\\gamma_{ki_1}\\sqrt{\\widetilde{A}_{ki_1i_1}} / \
+                      \\gamma_{ki_2}\\sqrt{\\widetilde{A}_{ki_2i_2}}+1)$")
             fig.canvas.draw()
             fig.canvas.flush_events()
             if self.save_dir:
@@ -1899,10 +1892,8 @@ class Visualize:
                 vert=False,
                 patch_artist=True,
             )
-            ax[5].set_title(
-                r"$\\log(\\gamma_{ki_1}\\sqrt{\\widetilde{A}_{ki_1i_1}} / \
-                      \\gamma_{ki_2}\\sqrt{\\widetilde{A}_{ki_2i_2}}+1)$"
-            )
+            ax[5].set_title(r"$\\log(\\gamma_{ki_1}\\sqrt{\\widetilde{A}_{ki_1i_1}} / \
+                      \\gamma_{ki_2}\\sqrt{\\widetilde{A}_{ki_2i_2}}+1)$")
             fig.canvas.draw()
             fig.canvas.flush_events()
             if self.save_dir:
@@ -2059,6 +2050,7 @@ class Visualize:
                         y[pts_on_tear, 0],
                         y[pts_on_tear, 1],
                         s=s,
+                        cmap=cmap1,
                         c=color_of_pts_on_tear[pts_on_tear],
                         vmin=None,
                         vmax=None,

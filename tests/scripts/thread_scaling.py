@@ -28,6 +28,7 @@ def run_once(X, n_jobs):
         min_cluster_size=5,
         n_iter=3,
         nu=4,
+        tear=True,
         verbose=False,
         n_jobs=n_jobs,
     )
@@ -38,12 +39,19 @@ def run_once(X, n_jobs):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=2000,
-                        help="Klein bottle sample count (default 2000).")
-    parser.add_argument("--jobs", type=int, nargs="+", default=[1, 2, 4, 8],
-                        help="List of n_jobs values to benchmark.")
-    parser.add_argument("--repeats", type=int, default=2,
-                        help="Repeats per n_jobs (best time kept).")
+    parser.add_argument(
+        "--n", type=int, default=2000, help="Klein bottle sample count (default 2000)."
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="List of n_jobs values to benchmark.",
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=2, help="Repeats per n_jobs (best time kept)."
+    )
     args = parser.parse_args()
 
     print(f"Loading kleinbottle4d with n={args.n}...")

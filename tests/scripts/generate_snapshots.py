@@ -65,6 +65,7 @@ def construct_rats(
             cost_function=cost_function,
             n_iter=n_iter,
             nu=nu,
+            tear=True,
             verbose=verbose,
         )
     except TypeError:
@@ -76,14 +77,22 @@ def construct_rats(
             cost_fn_name=cost_function,
             max_iter=n_iter,
             nu=nu,
+            to_tear=True,
             verbose=verbose,
         )
 
 
-def run_model(n_neighbors, min_cluster_size, cost_function, dataset_name, dirpath, force_compute=False):
+def run_model(
+    n_neighbors,
+    min_cluster_size,
+    cost_function,
+    dataset_name,
+    dirpath,
+    force_compute=False,
+):
     fname = f"dataset={dataset_name}_k={n_neighbors}_eta_min={min_cluster_size}_cost-fn={cost_function}.res"
     path = os.path.join(dirpath, fname)
-    
+
     if os.path.exists(path) and not force_compute:
         return
 
@@ -119,7 +128,9 @@ def run_model(n_neighbors, min_cluster_size, cost_function, dataset_name, dirpat
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="generate_snapshots", description="Run toy examples to generate baselines.")
+    parser = argparse.ArgumentParser(
+        prog="generate_snapshots", description="Run toy examples to generate baselines."
+    )
     parser.add_argument(
         "--path-to-results-dir",
         type=str,
@@ -127,16 +138,20 @@ if __name__ == "__main__":
         help="Results will be stored in this directory.",
     )
     parser.add_argument(
-        "--force-compute", action="store_true", help="Re-compute if results already exist."
+        "--force-compute",
+        action="store_true",
+        help="Re-compute if results already exist.",
     )
     parser.add_argument(
-        "--fast-mode", action="store_true", help="Run a minimal test subset for fast CI execution."
+        "--fast-mode",
+        action="store_true",
+        help="Run a minimal test subset for fast CI execution.",
     )
     args = parser.parse_args()
 
     force_compute = args.force_compute
     dirpath = args.path_to_results_dir.rstrip("/")
-    
+
     if not os.path.exists(dirpath):
         os.makedirs(dirpath, exist_ok=True)
 
@@ -159,7 +174,11 @@ if __name__ == "__main__":
         min_cluster_sizes = [5, 10]
         cost_functions = ["distortion", "alignment"]
 
-    argslist = list(itertools.product(n_neighbors_list, min_cluster_sizes, cost_functions, dataset_names))
+    argslist = list(
+        itertools.product(
+            n_neighbors_list, min_cluster_sizes, cost_functions, dataset_names
+        )
+    )
 
     Parallel(n_jobs=1)(
         delayed(run_model)(*args, dirpath, force_compute) for args in argslist
