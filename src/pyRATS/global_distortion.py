@@ -5,9 +5,7 @@ from pyRATS._tear_coloring import compute_tear_graph
 import numpy as np
 from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
-import sys
 
-sys.path.insert(0, "/Users/joshuaoffergeld/Documents/pyRATS")
 from examples import vis
 
 
