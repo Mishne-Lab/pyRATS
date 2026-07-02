@@ -6,8 +6,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
 
-from examples import vis
-
 
 def _shortest_paths(
     X,
