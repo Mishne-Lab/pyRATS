@@ -59,7 +59,7 @@ def _compute_tear_aware_shortest_path_distances(
     )
     if tear_graph is None:
         return dist
-        
+
     tear_graph = tear_graph.tocoo()
     tear_graph_row_inds = tear_graph.row
     tear_graph_col_inds = tear_graph.col
@@ -258,6 +258,35 @@ def compute_global_distortion(
     metric="euclidean",
     max_crossings=20,
 ):
+    """
+    Compute global distortion
+
+    Parameters
+    ------
+    X : array-like, shape (n_samples, D)
+        Data
+    y : array-like, shape (n_samples, d)
+        Data in embedding
+
+    n_nbrs : int
+        Number of neighbors for distortion analysis
+
+    model : RATS object
+
+
+    metric : str, default: 'euclidean'
+
+    max_crossings : int, default=20
+
+    Returns
+    ------
+    distortions : array-like, shape (n_samples)
+        Array of distortions for each point
+
+    max_distortion : float
+        Maximum distortion
+
+    """
 
     gt_dist = _shortest_paths(X, n_nbrs, metric=metric)
 
@@ -281,6 +310,7 @@ def compute_global_distortion(
         )
 
     return _compute_distortion_at(emb_dist, gt_dist)
+
 
 def find_best_hyperparams(
     dist_ats,
