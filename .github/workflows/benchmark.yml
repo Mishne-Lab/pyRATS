@@ -17,12 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        ref: ["${{ github.sha }}", "5eaa1c6a82eb0a316ff2a6911e0ef7379add0bad"]
+        ref: ["${{ github.sha }}", "e86205568c01293e49a65ac73f8434ca1dd503fb"]
         include:
           - ref: "${{ github.sha }}"
             ref_name: "Current HEAD"
-          - ref: "5eaa1c6a82eb0a316ff2a6911e0ef7379add0bad"
-            ref_name: "5eaa1c6 (Joshua V1)"
+          - ref: "e86205568c01293e49a65ac73f8434ca1dd503fb"
+            ref_name: "e862055 (Joshua V2)"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
