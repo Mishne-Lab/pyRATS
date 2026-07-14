@@ -9,9 +9,9 @@ pyRATS is available across platforms.
 It requires `python >= 3.9` and standard scientific computing packages such as numpy, scipy and sklearn. 
 The full list of dependencies is available in the `pyproject.toml` file.
 
-We have tested the package through [GitHub Actions][https://github.com/actions/runner-images] on Ubuntu 24.04, macOS 15 Arm64, and Windows Server 2025.
+We have tested the package through [GitHub Actions](https://github.com/actions/runner-images) on Ubuntu 24.04, macOS 15 Arm64, and Windows Server 2025.
 
-Local testing was performed on macOS Tahoe 26.5.2, and 
+Local testing was performed on macOS Tahoe 26.5.2.
 
 # Installation
 ```
