@@ -4,6 +4,15 @@ pyRATS is a lightweight Python tool implementing [Riemannian Alignment of Tangen
 With the ubiquity of high-dimensional datasets in various natural sciences, identifying low-dimensional topological manifolds within such datasets may reveal principles connecting latent variables to measurable instances in the world. 
 While leading dimensionality reduction methods introduce distortion during this process, RATS excels at the visualization and deciphering of latent variables. RATS recovers low-distortion embeddings of data, including the ability to embed closed manifolds into their intrinsic dimension using a tearing process.
 
+# Requirements
+pyRATS is available across platforms.
+It requires `python >= 3.9` and standard scientific computing packages such as numpy, scipy and sklearn. 
+The full list of dependencies is available in the `pyproject.toml` file.
+
+We have tested the package through [GitHub Actions][https://github.com/actions/runner-images] on Ubuntu 24.04, macOS 15 Arm64, and Windows Server 2025.
+
+Local testing was performed on macOS Tahoe 26.5.2, and 
+
 # Installation
 ```
 pip install git+https://github.com/Mishne-Lab/pyRATS
@@ -23,18 +32,23 @@ RATS can provide 'gluing' instructions that indicate which two points on the man
 Not only are we able to generate accurate low-dimensional embeddings, this feature allows for manifold denoising by projecting it to lower dimensional spaces and projecting back.
 
 # Example
+A list of examples and reproductions are available in the `pyRATS/examples` folder.
 A full working example is available [here](https://colab.research.google.com/drive/1nsdjV8lrE5Dg7TI2SZZmWdAMfuFkdw8Q?usp=sharing) on Google Colab.
 You can achieve an equivalent output by installing pyRATS, navigating to the `pyRATS/examples` folder and running:
 ```py
 from pyRATS import rats
 import datasets, vis 
 
+import time
+
 # sample 5000 datapoints from a kleinbottle manifold in living in 4d space
 X, labels, _ = datasets.Datasets().kleinbottle4d(n=5000)
 
 # create a RATS object projecting the data to 2d while tearing the manifold
 model = rats.RATS(n_components=2, n_neighbors=28, min_cluster_size=5, tear=True)
+start_time = time.time()
 y = model.fit_transform(X)
+print(f'runtime: {time.time() - start_time} s')
 
 # compute the gluing instructions along the tear
 tear_color_eig_inds = [7, 2, 4]
@@ -48,6 +62,8 @@ vis.Visualize().global_embedding(
   figsize=(3, 3)
 )
 ```
+runtime: 23.4564 s
+
 ![Example](examples/kleinbottle_example.png)
 
 # Docs
