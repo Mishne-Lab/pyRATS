@@ -50,7 +50,7 @@ jobs:
     # Step 2: Generate Expected Baselines (using baseline source code but current scripts)
     - name: Generate Expected Baselines
       run: |
-        git checkout 8e27b77b3247e1ac7447e7ea429e0f0c103a3fb0 -- src/
+        git checkout e86205568c01293e49a65ac73f8434ca1dd503fb -- src/
         python tests/scripts/generate_snapshots.py --path-to-results-dir tests/data/expected ${{ steps.set-flag.outputs.fast_flag }}
         git checkout HEAD -- src/
 
