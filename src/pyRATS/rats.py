@@ -19,8 +19,8 @@ from pyRATS._utils import (
     batched_pdist,
     add_spacing_between_clusters,
     induce_connections,
+    spectrum_of_laplacian_from_neighbors
 )
-from pyRATS._gl import spectrum_of_laplacian_from_neighbors
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
@@ -443,15 +443,7 @@ class RATS:
             # these also contain trivial eigenvectors if n_ignore is zero
             _, phi = spectrum_of_laplacian_from_neighbors(
                 self.neigh_ind[:,1:], self.neigh_dist[:,1:], # remove self-loops
-                opts = {
-                    'which': 'unnorm',
-                    'tuning': 'self',
-                    'k_tune': self.k_nn0//4,
-                    'kernel': 'gaussian',
-                    'ds_max_iter': 0,
-                    'n_eig': self.n_forced_clusters,
-                    'n_ignore': 0
-                }
+                k_tune = max(1, self.k_nn0//4), n_eig=self.n_forced_clusters
             )
             
             kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=42)
