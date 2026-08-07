@@ -1,6 +1,7 @@
 import numpy as np
 import warnings
 from scipy.sparse import csr_matrix
+from sklearn.cluster import KMeans
 
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
@@ -19,6 +20,7 @@ from pyRATS._utils import (
     add_spacing_between_clusters,
     induce_connections,
 )
+from pyRATS._gl import spectrum_of_laplacian_from_neighbors
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
@@ -436,6 +438,39 @@ class RATS:
         self.neigh_dist, self.neigh_ind = nearest_neighbors(
             X, self.k_nn0, self.metric, sort_results, self.n_jobs
         )
+        if self.n_forced_clusters > 1:
+            # compute eigenvectors of the graph Laplacian
+            # these also contain trivial eigenvectors if n_ignore is zero
+            _, phi = spectrum_of_laplacian_from_neighbors(
+                self.neigh_ind[:,1:], self.neigh_dist[:,1:], # remove self-loops
+                opts = {
+                    'which': 'unnorm',
+                    'tuning': 'self',
+                    'k_tune': self.k_nn0//4,
+                    'kernel': 'gaussian',
+                    'ds_max_iter': 0,
+                    'n_eig': self.n_forced_clusters,
+                    'n_ignore': 0
+                }
+            )
+            
+            kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=42)
+            c_labels = kmeans.fit_predict(phi)
+
+            for i in range(self.n_forced_clusters):
+                mask = c_labels == i
+                print('No. of points in cluster', i, ':', mask.sum(), flush=True)
+                local_dist, local_ind = nearest_neighbors(
+                    X[mask,:],
+                    self.k_nn0,
+                    self.metric,
+                    sort_results,
+                    self.n_jobs
+                )
+                
+                self.neigh_dist[mask,:] = local_dist
+                global_indices = np.where(mask)[0]
+                self.neigh_ind[mask,:] = global_indices[local_ind]
 
         if condition_num is not None:
             self.neigh_dist, self.neigh_ind, self.k_nn0 = induce_connections(
