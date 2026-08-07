@@ -1115,13 +1115,13 @@ def compute_seq_of_views(
     n_comp, comp_labels = connected_components(W, directed=False, return_labels=True)
 
     # Remove edges to force clusters if desired
-    if n_forced_clusters > n_comp:
-        inds = np.argsort(W.data)[-(n_forced_clusters - n_comp) :]
-        W.data[inds] = 0
-        W.eliminate_zeros()
-        n_comp, comp_labels = connected_components(
-            W, directed=False, return_labels=True
-        )
+    # if n_forced_clusters > n_comp:
+    #     inds = np.argsort(W.data)[-(n_forced_clusters - n_comp) :]
+    #     W.data[inds] = 0
+    #     W.eliminate_zeros()
+    #     n_comp, comp_labels = connected_components(
+    #         W, directed=False, return_labels=True
+    #     )
 
     if verbose:
         print("No. of connected components (manifolds):", n_comp)
@@ -1172,7 +1172,7 @@ def compute_seq_of_views(
                 T, center_i, directed=False
             )  # (ignores edge weights)
             seq = views_in_this_comp[seq]
-            mask = rho_ > 0
+            mask = rho_ >= 0
             rho_[mask] = views_in_this_comp[rho_[mask]]
             rho = np.zeros(n_views, dtype=int) - 9999
             rho[views_in_this_comp] = rho_
@@ -2080,9 +2080,14 @@ def add_spacing_between_clusters(y, seq_of_intermed_views_in_cluster, param, C):
             param.v[seq, 0] += offset - offset_
             y[pts_in_cluster_i, 0] += offset - offset_
 
-        # recompute the offset as the x coordinate of
-        # rightmost point of the current cluster
-        offset = 1.25 * np.max(y[pts_in_cluster_i, 0])
+        # Calculate the width of the newly placed cluster
+        cluster_min = np.min(y[pts_in_cluster_i, 0])
+        cluster_max = np.max(y[pts_in_cluster_i, 0])
+        cluster_width = cluster_max - cluster_min
+        
+        # Next cluster starts at the current max edge plus a gap 
+        # (e.g., 25% of the current cluster's width)
+        offset = cluster_max + (0.25 * cluster_width)
 
     return cluster_label
 
