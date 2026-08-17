@@ -3,7 +3,6 @@ from scipy.sparse.csgraph import shortest_path
 from sklearn.neighbors import NearestNeighbors
 from pyRATS._tear_coloring import compute_tear_graph
 import numpy as np
-from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
 
 
