@@ -31,3 +31,10 @@ test = [
     "imageio",
     "seaborn",
 ]
+
+examples = [
+    "pandas",
+    "matplotlib",
+    "imageio",
+    "seaborn",
+]

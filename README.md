@@ -18,6 +18,12 @@ Local testing was performed on macOS Tahoe 26.5.2.
 pip install git+https://github.com/Mishne-Lab/pyRATS
 ```
 
+or if you want to run the examples
+
+```
+pip install "pyrats[examples] @ git+https://github.com/Mishne-Lab/pyRATS"
+```
+
 # RATS
 RATS applies three main algorithmic steps:
 1) It maps locally linear patches of points via (Kernel-)PCA to the embedding space. Postprocessing may be applied on noisy data to remove patches that incur abnormally high distortion. 
