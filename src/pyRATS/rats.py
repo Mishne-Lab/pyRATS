@@ -1,3 +1,4 @@
+import numbers
 import numpy as np
 import warnings
 from scipy.sparse import csr_matrix
@@ -24,6 +25,32 @@ from pyRATS._utils import (
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
+
+
+def _check_random_seed(random_state):
+    """Resolve ``random_state`` to the int seed used throughout one fit.
+
+    An int is used as is, so the default (42) reproduces earlier versions
+    exactly. None, a RandomState or a Generator supplies a new seed for every
+    fit; None draws it from NumPy's global random generator.
+    """
+    max_seed = np.iinfo(np.int32).max
+    if random_state is None:
+        return int(np.random.randint(max_seed))
+    if isinstance(random_state, numbers.Integral):
+        if not 0 <= random_state <= 2**32 - 1:
+            raise ValueError(
+                f"random_state must be between 0 and 2**32 - 1, got {random_state}."
+            )
+        return int(random_state)
+    if isinstance(random_state, np.random.RandomState):
+        return int(random_state.randint(max_seed))
+    if isinstance(random_state, np.random.Generator):
+        return int(random_state.integers(max_seed))
+    raise ValueError(
+        "random_state must be an int, a numpy.random.RandomState or "
+        f"numpy.random.Generator instance, or None; got {random_state!r}."
+    )
 
 
 class RATS:
@@ -110,6 +137,18 @@ class RATS:
     n_jobs : int, default=-1
         The number of CPU-cores to use. If -1, uses all available cores.
 
+    random_state : int, RandomState instance, Generator or None, default=42
+        Seed of the random starting vectors of the iterative eigen- and
+        singular-value solvers (local PCA, kernel PCA, spectral initialization
+        and tear coloring), of k-means when ``n_forced_clusters > 1`` and of
+        the choice of far-off points when ``n_repel > 0``. An int is used as
+        the seed; the default, 42, reproduces the results of earlier versions
+        exactly. Pass other ints to check how much an embedding depends on
+        the seed. None draws a new seed from NumPy's global random generator
+        at every fit, and a RandomState or Generator instance supplies one
+        seed per fit. Apart from that draw, pyRATS does not modify NumPy's
+        global random state.
+
     """
 
     # Mapping from deprecated parameter names to their new equivalents.
@@ -157,6 +196,7 @@ class RATS:
         global_init_algo_name="procrustes",
         verbose=False,
         n_jobs=-1,
+        random_state=42,
         **kwargs,
     ):
         # ------------------------------------------------------------------
@@ -270,6 +310,7 @@ class RATS:
         self.repel_by, self.repel_decay, self.n_repel = repel_by, repel_decay, n_repel
         self.n_forced_clusters = n_forced_clusters
         self.global_init_algo_name = global_init_algo_name
+        self.random_state = random_state
 
         if self.patience is None:
             self.patience = self.max_iter
@@ -303,11 +344,15 @@ class RATS:
         y : array-like, shape (n_samples, d)
             X transformed in the new space.
         """
+        # One seed for every random draw of this fit (and of the tear coloring
+        # that follows it), and the fit's own generator for the draws that
+        # share one stream across functions. NumPy's global generator is never
+        # reseeded.
+        self._seed = _check_random_seed(self.random_state)
+        rng = np.random.RandomState(self._seed)
+
         n_steps = 5 if self.to_postprocess else 4
         current_step = 1
-        # The fit's own random generator, used where the fit draws from one
-        # stream across functions; NumPy's global generator is never touched.
-        rng = np.random.RandomState(42)
 
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Fitting neighborhood graph...")
@@ -354,6 +399,10 @@ class RATS:
         ------
             Color of points on tear or None if no tear could be detected.
 
+        Notes
+        ------
+        Uses the seed of the last fit, so the colors match that fit.
+
         """
         if not self.to_tear:
             print(
@@ -373,6 +422,7 @@ class RATS:
             self.verbose,
             self.n_jobs,
             self.Utildeg,
+            random_state=getattr(self, "_seed", 42),
         )
 
     def fit(self, X):
@@ -449,7 +499,7 @@ class RATS:
                 k_tune = max(1, self.k_nn0//4), n_eig=self.n_forced_clusters
             )
             
-            kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=42)
+            kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=self._seed)
             c_labels = kmeans.fit_predict(phi)
 
             for i in range(self.n_forced_clusters):
@@ -514,6 +564,7 @@ class RATS:
                 self.kpca_fit_inverse_transform,
                 self.n_jobs,
                 verbose=self.verbose,
+                random_state=self._seed,
             )
         else:
             self.param = lpca(
@@ -524,6 +575,7 @@ class RATS:
                 ),
                 self.n_jobs,
                 verbose=self.verbose,
+                random_state=self._seed,
             )
 
         self.param.b = np.ones(n)
@@ -592,14 +644,14 @@ class RATS:
             Utilde = C.dot(self.U)
             Utilde.sort_indices() # determinism
 
-            rng.seed(42)
+            rng.seed(self._seed)
             self.param.noise_seed = rng.randint(M * M, size=M)
         else:
             c = np.arange(n, dtype=int)
             C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(n, n), dtype=bool)
             n_C = np.ones(n, dtype=int)
             Utilde = self.U.copy()
-            rng.seed(42)
+            rng.seed(self._seed)
             self.param.noise_seed = rng.randint(n * n, size=n)
 
         self.Utilde = Utilde
@@ -666,7 +718,7 @@ class RATS:
             self.global_init_algo_name,
             self.verbose,
             rng=rng,
-            random_state=42,
+            random_state=self._seed,
         )
 
         _ = add_spacing_between_clusters(
