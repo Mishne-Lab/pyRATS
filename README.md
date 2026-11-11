@@ -92,6 +92,28 @@ export PYRATS_MEMORY_LIMIT=42949672960
 python your_script.py
 ```
 
+# Reproducibility
+The start vectors of the iterative eigen- and singular-value solvers in `RATS` are seeded with `random_state`, which defaults to `42`. Repeated fits of the same data on the same machine therefore give the same embedding, and the default reproduces the results of earlier versions. pyRATS does not modify NumPy's global random state.
+
+Another seed can give another embedding. Most often the two differ only by a rotation or a reflection, but not always, so a few seeds are a cheap check of how much an embedding depends on the seed:
+
+```py
+import numpy as np
+from scipy.linalg import orthogonal_procrustes
+from scipy.spatial.distance import pdist
+from pyRATS import rats
+
+def shift(a, b):
+    """Median distance between corresponding points of two embeddings after a
+    rigid alignment (rotation, reflection, translation), in units of a's diameter."""
+    a, b = a - a.mean(0), b - b.mean(0)
+    R, _ = orthogonal_procrustes(b, a)
+    return float(np.median(np.linalg.norm(b @ R - a, axis=1)) / pdist(a).max())
+
+Y = {s: rats.RATS(random_state=s).fit_transform(X) for s in (42, 0, 1, 2)}
+print({s: round(shift(Y[42], Y[s]), 3) for s in (0, 1, 2)})
+```
+
 
 Citation
 ----------
