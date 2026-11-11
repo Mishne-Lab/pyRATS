@@ -305,6 +305,9 @@ class RATS:
         """
         n_steps = 5 if self.to_postprocess else 4
         current_step = 1
+        # The fit's own random generator, used where the fit draws from one
+        # stream across functions; NumPy's global generator is never touched.
+        rng = np.random.RandomState(42)
 
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Fitting neighborhood graph...")
@@ -326,13 +329,13 @@ class RATS:
         # Construct intermediate views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Clustering intermediate views...")
-        n_C = self._fit_intermediate_views()
+        n_C = self._fit_intermediate_views(rng)
         current_step += 1
 
         # Construct Global views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
-        y, labels = self._fit_global_views(n_C)
+        y, labels = self._fit_global_views(n_C, rng)
         if labels is not None:
             return y, labels
         return y
@@ -525,8 +528,14 @@ class RATS:
 
         self.param.b = np.ones(n)
 
-    def _fit_intermediate_views(self):
+    def _fit_intermediate_views(self, rng=None):
         """Cluster local views.
+
+        Parameters
+        ----------
+        rng : numpy.random.RandomState, default=None
+            The random generator of the fit. It is reseeded here, and the
+            initial embedding continues its stream. If None, a new one.
 
         Returns
         -------
@@ -545,6 +554,8 @@ class RATS:
 
         """
 
+        if rng is None:
+            rng = np.random.RandomState()
         n = self.neighborhood_graph_sym.shape[0]
         if self.eta_min > 1:
             c, n_C = best(
@@ -581,15 +592,15 @@ class RATS:
             Utilde = C.dot(self.U)
             Utilde.sort_indices() # determinism
 
-            np.random.seed(42)
-            self.param.noise_seed = np.random.randint(M * M, size=M)
+            rng.seed(42)
+            self.param.noise_seed = rng.randint(M * M, size=M)
         else:
             c = np.arange(n, dtype=int)
             C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(n, n), dtype=bool)
             n_C = np.ones(n, dtype=int)
             Utilde = self.U.copy()
-            np.random.seed(42)
-            self.param.noise_seed = np.random.randint(n * n, size=n)
+            rng.seed(42)
+            self.param.noise_seed = rng.randint(n * n, size=n)
 
         self.Utilde = Utilde
         self.C = C
@@ -597,13 +608,17 @@ class RATS:
 
         return n_C
 
-    def _fit_global_views(self, n_C):
+    def _fit_global_views(self, n_C, rng=None):
         """Align intermediate clusters via Riemannian gradient descent.
 
         Parameters
         ----------
         n_C: array-like, shape (n_clusters)
             Holds the number of datapoints per cluster.
+
+        rng : numpy.random.RandomState, default=None
+            The random generator of the fit, as left by
+            ``_fit_intermediate_views``.
 
         Returns
         -------
@@ -650,6 +665,8 @@ class RATS:
             self.n_repel,
             self.global_init_algo_name,
             self.verbose,
+            rng=rng,
+            random_state=42,
         )
 
         _ = add_spacing_between_clusters(
