@@ -92,6 +92,41 @@ export PYRATS_MEMORY_LIMIT=42949672960
 python your_script.py
 ```
 
+# Reproducibility
+The start vectors of the iterative eigen- and singular-value solvers in `RATS` are seeded with `random_state`, which defaults to `42`. Repeated fits of the same data on the same machine therefore give the same embedding, and the default reproduces the results of earlier versions. pyRATS does not modify NumPy's global random state.
+
+Another seed can give another embedding. Most often the two differ only by a rotation or a reflection, but not always, so a few seeds are a cheap check of how much an embedding depends on the seed:
+
+```py
+import numpy as np
+from scipy.linalg import orthogonal_procrustes
+from scipy.spatial.distance import pdist
+from pyRATS import rats
+
+def shift(a, b):
+    """Median distance between corresponding points of two embeddings after a
+    rigid alignment (rotation, reflection, translation), in units of a's diameter."""
+    a, b = a - a.mean(0), b - b.mean(0)
+    R, _ = orthogonal_procrustes(b, a)
+    return float(np.median(np.linalg.norm(b @ R - a, axis=1)) / pdist(a).max())
+
+Y = {s: rats.RATS(random_state=s).fit_transform(X) for s in (42, 0, 1, 2)}
+print({s: round(shift(Y[42], Y[s]), 3) for s in (0, 1, 2)})
+```
+
+# Embedding new points
+After a fit, `transform` embeds new points without changing the embedding. Each point gets the coordinates that the fitted local views give it, averaged as for the training points; near a tear, a point stays on the side of its nearest training point.
+
+```py
+model = rats.RATS(n_components=2, tear=True).fit(X_train)
+y_new = model.transform(X_new)
+
+# the distance of each point to its local views, which flags points off the manifold
+y_new, residual = model.transform(X_new, return_residual=True)
+```
+
+`transform(X_train)` reproduces `model.embedding_`. A point farther from the data than any training point's `n_neighbors`-th neighbor is embedded with the views of its nearest training point, with a warning.
+
 
 Citation
 ----------

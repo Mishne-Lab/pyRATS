@@ -131,7 +131,7 @@ def _inner_blas_threads(n_jobs):
     return max(1, cores // max(1, n_jobs))
 
 
-def lpca(X, d, U, n_jobs, verbose=False):
+def lpca(X, d, U, n_jobs, verbose=False, random_state=42):
     """Fit PCA model on the data X.
 
     Parameters
@@ -150,6 +150,10 @@ def lpca(X, d, U, n_jobs, verbose=False):
 
     verbose : bool, default=False
         Write logs to stdout.
+
+    random_state : int, default=42
+        Seed of the starting vector of the truncated SVD (ARPACK) of every
+        local neighborhood. The same starting vector is used for every point.
 
     Returns
     ------
@@ -183,6 +187,7 @@ def lpca(X, d, U, n_jobs, verbose=False):
         mu = np.zeros((n_inds, p))
         var_explained = np.zeros((n_inds, p))
         n_pc_dir_chosen = np.zeros(n_inds)
+        rng = np.random.RandomState(random_state)
 
         for k in range(start_ind, end_ind):
             i = k - start_ind
@@ -196,8 +201,8 @@ def lpca(X, d, U, n_jobs, verbose=False):
             if d in X_k.shape:
                 Q_k, Sigma_k, _ = svd(X_k)
             else:
-                np.random.seed(42)
-                v0 = np.random.uniform(0, 1, np.min(X_k.shape))
+                rng.seed(random_state)  # same start vector at every point
+                v0 = rng.uniform(0, 1, np.min(X_k.shape))
                 Q_k, Sigma_k, _ = svds(X_k, k=d, which="LM", v0=v0)
 
             var_explained[i, :d] = Sigma_k**2
@@ -237,7 +242,7 @@ def lpca(X, d, U, n_jobs, verbose=False):
     return param
 
 
-def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
+def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False, random_state=42):
     """Fit Kernel PCA models to the data X. Uses sklearn.decomposition.KernelPCA under the hood.
 
     Parameters
@@ -264,6 +269,9 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
 
     verbose : bool, default-False
         Write logs to stdout.
+
+    random_state : int, default=42
+        Seed of the starting vector of ARPACK in every local KernelPCA.
 
     Returns
     ------
@@ -295,7 +303,7 @@ def kpca(X, d, U, kernel, fit_inverse_transform, n_jobs, verbose=False):
                 n_components=d,
                 kernel=kernel,
                 eigen_solver="arpack",
-                random_state=42,
+                random_state=random_state,
                 fit_inverse_transform=fit_inverse_transform,
             )
             U_k = U[k]
@@ -1246,6 +1254,8 @@ def compute_init_embedding(
     n_repel,
     global_init_algo_name,
     verbose,
+    rng=None,
+    random_state=42,
 ):
     """Initial alignment of datapoints in embedding via Procrustes alignment.
 
@@ -1277,6 +1287,15 @@ def compute_init_embedding(
     verbose : bool
         If True, print logs to stdout.
 
+    rng : numpy.random.RandomState, default=None
+        The random generator of the fit. It picks the far-off points when
+        ``n_repel > 0`` and is reseeded with ``random_state`` for the starting
+        vector of the spectral initialization, continuing the same stream
+        across clusters. If None, a new one seeded with ``random_state``.
+
+    random_state : int, default=42
+        Seed of the starting vector of the spectral initialization.
+
     Returns
     ------
     y : array-like, shape (n_samples, d)
@@ -1285,6 +1304,8 @@ def compute_init_embedding(
     """
 
     M, n = Utilde.shape
+    if rng is None:
+        rng = np.random.RandomState(random_state)
 
     param.T = np.tile(np.eye(d), [M, 1, 1])
     param.v = np.zeros((M, d))
@@ -1302,7 +1323,7 @@ def compute_init_embedding(
         seq_0 = seq[0]
         is_visited_view[seq_0] = True
         y[C[seq_0, :].indices, :] = param.eval_(seq_0, C[seq_0, :].indices)
-        far_off_points = compute_far_off_points(d_e, n_repel)
+        far_off_points = compute_far_off_points(d_e, n_repel, rng)
 
         if global_init_algo_name == "procrustes":
             y, is_visited_view = procrustes_init(
@@ -1330,6 +1351,8 @@ def compute_init_embedding(
                 n_repel,
                 far_off_points,
                 seq_of_intermed_views_in_cluster,
+                rng=rng,
+                random_state=random_state,
             )
         else:
             raise NotImplementedError()
@@ -1394,6 +1417,7 @@ def compute_final_embedding(
     far_off_points,
     seq_of_intermed_views_in_cluster,
     verbose,
+    return_incidence=False,
 ):
     """Align clusters via Riemannian Gradient Descent.
 
@@ -1448,14 +1472,16 @@ def compute_final_embedding(
         verbose : bool
             If True, print logs to stdout.
 
+        return_incidence : bool, default=False
+            If True, also return the incidence matrix (views x points) used in
+            the last alignment step.
+
         Returns
         ------
         y : array-like, shape (n_samples, d)
             Aligned points in the embedded space
     s
     """
-
-    np.random.seed(42)  # for reproducbility
 
     patience_ctr = patience
     prev_err = None
@@ -1512,9 +1538,16 @@ def compute_final_embedding(
 
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu)
-        return y, Utildeg, labels
+        out = (y, Utildeg, labels)
+    else:
+        out = (y, None, labels)
 
-    return y, None, labels
+    if return_incidence:
+        # The incidence used in the last alignment step (Utilde restricted by
+        # the tear): the embedding of each point is the mean of what these
+        # views give it. Utildeg above is recomputed from the final embedding.
+        return out + (Utilde_t,)
+    return out
 
 
 def rgd_alignment(
@@ -1822,7 +1855,9 @@ def build_ortho_optim(d, Utilde, param, repel_by, far_off_points=[], verbose=Fal
     return CC, Lpinv_BT, D, B
 
 
-def compute_far_off_points(d_e, n_repel):
+def compute_far_off_points(d_e, n_repel, rng=None):
+    if rng is None:
+        rng = np.random.RandomState(42)
     far_off_points = []
     dist_from_far_off_points = None
     while len(far_off_points) < n_repel:
@@ -1831,7 +1866,7 @@ def compute_far_off_points(d_e, n_repel):
             dist_from_far_off_points = np.zeros(d_e.shape[0]) + np.inf
             while np.sum(np.isinf(dist_from_far_off_points)):
                 inf_inds = np.where(np.isinf(dist_from_far_off_points))[0]
-                np.random.shuffle(inf_inds)
+                rng.shuffle(inf_inds)
                 far_off_points.append(inf_inds[0])
                 dist_from_far_off_points = np.minimum(
                     dist_from_far_off_points,
@@ -1914,7 +1949,11 @@ def spectral_alignment(
     n_repel,
     far_off_points,
     seq_of_intermed_views_in_cluster=None,
+    rng=None,
+    random_state=42,
 ):
+    if rng is None:
+        rng = np.random.RandomState()
     if seq_of_intermed_views_in_cluster is None:
         seq_of_intermed_views_in_cluster = [np.arange(Utilde.shape[0])]
     CC, Lpinv_BT, _, _ = build_ortho_optim(
@@ -1935,8 +1974,8 @@ def spectral_alignment(
     CC0 = CC0 / np.sqrt(M)
     v0 = CC0[:, 0]
 
-    np.random.seed(42)
-    v0 = np.random.uniform(0, 1, CC.shape[0])
+    rng.seed(random_state)
+    v0 = rng.uniform(0, 1, CC.shape[0])
     if (n_repel == 0) or (repel_by == 0):
         # To find smallest eigenvalues, using shift-inverted algo with mode=normal and which='LM'
         W_, V_ = scipy.sparse.linalg.eigsh(CC, k=d, v0=v0, sigma=-1e-3)
@@ -2224,8 +2263,7 @@ class Param:
         post-processing per chunk. Semantics match the original inline code.
         """
         if self.noise_var:
-            np.random.seed(self.noise_seed[0])
-            temp2 = np.random.normal(
+            temp2 = np.random.RandomState(self.noise_seed[0]).normal(
                 0, self.noise_var, (self.X.shape[0], temp.shape[2])
             )
             temp = temp + temp2[masks, :]
@@ -2308,8 +2346,9 @@ class Param:
             temp = self.model[k].transform(X_)
 
         if self.noise_var:
-            np.random.seed(self.noise_seed[k])
-            temp2 = np.random.normal(0, self.noise_var, (n, temp.shape[1]))
+            temp2 = np.random.RandomState(self.noise_seed[k]).normal(
+                0, self.noise_var, (n, temp.shape[1])
+            )
             temp = temp + temp2[mask, :]
 
         if self.noise is not None:
@@ -2327,6 +2366,48 @@ class Param:
             if self.v is not None:
                 temp = temp + self.v[[k], :]
             return temp
+
+    def eval_new_(self, view_index, X_new):
+        """Maps new points (rows of X_new, not indices into the training
+        data) through the parameterization of a view, with its scale,
+        rotation and translation. Same arithmetic as eval_, without the
+        training-time noise.
+
+        Parameters
+        ------
+        view_index : int
+            The index of the parameterization to use.
+
+        X_new : array-like, shape (n_points, n_features)
+            Points to map to the embedding.
+        """
+        k = view_index
+        if self.algo == "lpca":
+            temp = np.dot(X_new - self.mu[k, :][np.newaxis, :], self.Psi[k, :, :])
+        else:
+            if self.standardize:
+                raise NotImplementedError(
+                    "New points cannot be mapped with standardized local views."
+                )
+            temp = self.model[k].transform(X_new)
+        if self.add_dim:
+            temp = np.concatenate([temp, np.zeros((temp.shape[0], 1))], axis=1)
+        if self.b is None:
+            return temp
+        temp = self.b[k] * temp
+        if self.T is not None:
+            temp = np.dot(temp, self.T[k, :, :])
+        if self.v is not None:
+            temp = temp + self.v[[k], :]
+        return temp
+
+    def residual_new_(self, view_index, X_new):
+        """Distance from each new point to the affine subspace of a linear
+        local view (its mean plus the span of its principal directions)."""
+        k = view_index
+        Z = X_new - self.mu[k, :][np.newaxis, :]
+        P = self.Psi[k, :, :]
+        return np.linalg.norm(Z - np.dot(np.dot(Z, P), P.T), axis=1)
 
     def replace_(self, new_param_ind):
         """Re-orders the parameterizations.
@@ -2496,7 +2577,6 @@ def spectrum_of_laplacian_from_neighbors(
 ):
     n = neigh_ind.shape[0]
     
-    np.random.seed(42)
     v0 = np.ones(n)/np.sqrt(n)
     if which in ['unnorm', 'symnorm']:
         L = graph_laplacian(

@@ -1,7 +1,9 @@
+import numbers
 import numpy as np
 import warnings
 from scipy.sparse import csr_matrix
 from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
 
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
@@ -24,6 +26,32 @@ from pyRATS._utils import (
 from pyRATS._tear_coloring import compute_color_of_pts_on_tear
 
 # _postprocess_col_range removed to reduce Parallel overhead in tight loops.
+
+
+def _check_random_seed(random_state):
+    """Resolve ``random_state`` to the int seed used throughout one fit.
+
+    An int is used as is, so the default (42) reproduces earlier versions
+    exactly. None, a RandomState or a Generator supplies a new seed for every
+    fit; None draws it from NumPy's global random generator.
+    """
+    max_seed = np.iinfo(np.int32).max
+    if random_state is None:
+        return int(np.random.randint(max_seed))
+    if isinstance(random_state, numbers.Integral):
+        if not 0 <= random_state <= 2**32 - 1:
+            raise ValueError(
+                f"random_state must be between 0 and 2**32 - 1, got {random_state}."
+            )
+        return int(random_state)
+    if isinstance(random_state, np.random.RandomState):
+        return int(random_state.randint(max_seed))
+    if isinstance(random_state, np.random.Generator):
+        return int(random_state.integers(max_seed))
+    raise ValueError(
+        "random_state must be an int, a numpy.random.RandomState or "
+        f"numpy.random.Generator instance, or None; got {random_state!r}."
+    )
 
 
 class RATS:
@@ -110,6 +138,18 @@ class RATS:
     n_jobs : int, default=-1
         The number of CPU-cores to use. If -1, uses all available cores.
 
+    random_state : int, RandomState instance, Generator or None, default=42
+        Seed of the random starting vectors of the iterative eigen- and
+        singular-value solvers (local PCA, kernel PCA, spectral initialization
+        and tear coloring), of k-means when ``n_forced_clusters > 1`` and of
+        the choice of far-off points when ``n_repel > 0``. An int is used as
+        the seed; the default, 42, reproduces the results of earlier versions
+        exactly. Pass other ints to check how much an embedding depends on
+        the seed. None draws a new seed from NumPy's global random generator
+        at every fit, and a RandomState or Generator instance supplies one
+        seed per fit. Apart from that draw, pyRATS does not modify NumPy's
+        global random state.
+
     """
 
     # Mapping from deprecated parameter names to their new equivalents.
@@ -157,6 +197,7 @@ class RATS:
         global_init_algo_name="procrustes",
         verbose=False,
         n_jobs=-1,
+        random_state=42,
         **kwargs,
     ):
         # ------------------------------------------------------------------
@@ -270,6 +311,7 @@ class RATS:
         self.repel_by, self.repel_decay, self.n_repel = repel_by, repel_decay, n_repel
         self.n_forced_clusters = n_forced_clusters
         self.global_init_algo_name = global_init_algo_name
+        self.random_state = random_state
 
         if self.patience is None:
             self.patience = self.max_iter
@@ -303,6 +345,14 @@ class RATS:
         y : array-like, shape (n_samples, d)
             X transformed in the new space.
         """
+        # One seed for every random draw of this fit (and of the tear coloring
+        # that follows it), and the fit's own generator for the draws that
+        # share one stream across functions. NumPy's global generator is never
+        # reseeded.
+        self._seed = _check_random_seed(self.random_state)
+        rng = np.random.RandomState(self._seed)
+        self._transform_nn = None  # the neighbor index of transform, rebuilt for every fit
+
         n_steps = 5 if self.to_postprocess else 4
         current_step = 1
 
@@ -326,13 +376,14 @@ class RATS:
         # Construct intermediate views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Clustering intermediate views...")
-        n_C = self._fit_intermediate_views()
+        n_C = self._fit_intermediate_views(rng)
         current_step += 1
 
         # Construct Global views
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
-        y, labels = self._fit_global_views(n_C)
+        y, labels = self._fit_global_views(n_C, rng)
+        self.embedding_ = y
         if labels is not None:
             return y, labels
         return y
@@ -350,6 +401,10 @@ class RATS:
         Returns
         ------
             Color of points on tear or None if no tear could be detected.
+
+        Notes
+        ------
+        Uses the seed of the last fit, so the colors match that fit.
 
         """
         if not self.to_tear:
@@ -370,40 +425,134 @@ class RATS:
             self.verbose,
             self.n_jobs,
             self.Utildeg,
+            random_state=getattr(self, "_seed", 42),
         )
 
-    def fit(self, X):
+    def fit(self, X, condition_num=None):
         """Fit the model on X without returning the embedding.
+
+        The embedding is stored in ``embedding_``.
 
         Parameters
         ----------
         X : array-like, shape (n_samples, n_features)
             Sample data.
 
+        condition_num :
+            As in ``fit_transform``.
+
         Returns
         -------
         self
         """
-        raise NotImplementedError(
-            "fit() is not yet implemented. Use fit_transform() instead."
-        )
+        self.fit_transform(X, condition_num)
+        return self
 
-    def transform(self, X):
-        """Apply the fitted embedding to new data X.
+    def transform(self, X, return_residual=False):
+        """Embed new points with the local views of the fitted model.
+
+        Every point gets the coordinates that the fitted views give it: the
+        local (kernel) PCA of each view it belongs to, with the rotation and
+        translation the alignment found for that view, averaged over its views
+        as the fit averages its own points. The fitted embedding does not
+        change, and points of the training data get their own coordinates.
+
+        A new point belongs to the views of the training points that would
+        have it among their ``n_neighbors`` nearest neighbors. With tearing,
+        only the views that contain its nearest training point are kept, so
+        that a point near the tear lands on the side of that neighbor. A point
+        that no training point would count as a neighbor (far from the data)
+        is embedded with the views of its nearest training point, and a
+        warning says how many there were. A point equal to a training point
+        gets that point's views.
 
         Parameters
         ----------
         X : array-like, shape (n_samples, n_features)
-            New data to embed.
+            Points to embed, with the features of the training data.
+
+        return_residual : bool, default=False
+            If True, also return, for every point, its mean distance to the
+            affine subspaces of its views (the local mean plus the span of the
+            local principal directions), in the units of X. Large values flag
+            points off the fitted manifold. Only with ``kernel=None``.
 
         Returns
         -------
-        y : array-like, shape (n_samples, d)
-            X transformed in the new space.
+        y : ndarray, shape (n_samples, n_components)
+            The points in the embedding.
+
+        residual : ndarray, shape (n_samples,)
+            Only if ``return_residual`` is True.
         """
-        raise NotImplementedError(
-            "transform() is not yet implemented. Use fit_transform() instead."
-        )
+        if getattr(self, "Utilde_t", None) is None:
+            raise RuntimeError(
+                "This RATS instance is not fitted yet. Call fit or fit_transform first."
+            )
+        X = np.asarray(X, dtype=float)
+        X_train = self.param.X
+        if X.ndim != 2 or X.shape[1] != X_train.shape[1]:
+            raise ValueError(
+                f"X must have shape (n_samples, {X_train.shape[1]}), got {X.shape}."
+            )
+        if return_residual and self.param.algo != "lpca":
+            raise NotImplementedError("return_residual requires kernel=None.")
+
+        # The training points that would have each new point among their k
+        # nearest neighbors (k-th neighbor distance r_k), and the nearest one.
+        r_k = self.neigh_dist[:, self.k - 1]
+        if getattr(self, "_transform_nn", None) is None:
+            self._transform_nn = NearestNeighbors(
+                metric=self.metric, n_jobs=self.n_jobs
+            ).fit(X_train)
+        dist_near, near = self._transform_nn.kneighbors(X, n_neighbors=1)
+        dist_near, near = dist_near[:, 0], near[:, 0]
+        dist, ind = self._transform_nn.radius_neighbors(X, radius=r_k.max())
+
+        incidence = self.Utilde_t.tocsc()  # views x training points
+        views_of = lambda i: incidence.indices[incidence.indptr[i] : incidence.indptr[i + 1]]
+        views, n_far = [], 0
+        for q in range(len(X)):
+            side = views_of(near[q])
+            if dist_near[q] == 0:
+                views.append(side)  # a training point: its own views
+                continue
+            js = ind[q][dist[q] <= r_k[ind[q]]]
+            V = np.unique(self.c[js])
+            if len(V) == 0:
+                n_far += 1
+                V = side
+            elif self.to_tear:
+                V_side = np.intersect1d(V, side)
+                V = V_side if len(V_side) else side
+            views.append(V)
+        if n_far:
+            warnings.warn(
+                f"{n_far} of {len(X)} points are not among the n_neighbors nearest "
+                "neighbors of any training point; they were embedded with the "
+                "views of their nearest training point.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Average the predictions of the views, grouped by view.
+        by_view = {}
+        for q, V in enumerate(views):
+            for m in V:
+                by_view.setdefault(int(m), []).append(q)
+        y = np.zeros((len(X), self.d))
+        n_views = np.zeros(len(X))
+        residual = np.zeros(len(X)) if return_residual else None
+        for m, qs in by_view.items():
+            qs = np.asarray(qs)
+            y[qs] += self.param.eval_new_(m, X[qs])
+            n_views[qs] += 1
+            if return_residual:
+                residual[qs] += self.param.residual_new_(m, X[qs])
+        y /= n_views[:, None]
+        if return_residual:
+            return y, residual / n_views
+        return y
 
     def inverse_transform(self, y):
         """Map points from the embedding space back to the original space.
@@ -446,7 +595,7 @@ class RATS:
                 k_tune = max(1, self.k_nn0//4), n_eig=self.n_forced_clusters
             )
             
-            kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=42)
+            kmeans = KMeans(n_clusters=self.n_forced_clusters, random_state=self._seed)
             c_labels = kmeans.fit_predict(phi)
 
             for i in range(self.n_forced_clusters):
@@ -511,6 +660,7 @@ class RATS:
                 self.kpca_fit_inverse_transform,
                 self.n_jobs,
                 verbose=self.verbose,
+                random_state=self._seed,
             )
         else:
             self.param = lpca(
@@ -521,12 +671,19 @@ class RATS:
                 ),
                 self.n_jobs,
                 verbose=self.verbose,
+                random_state=self._seed,
             )
 
         self.param.b = np.ones(n)
 
-    def _fit_intermediate_views(self):
+    def _fit_intermediate_views(self, rng=None):
         """Cluster local views.
+
+        Parameters
+        ----------
+        rng : numpy.random.RandomState, default=None
+            The random generator of the fit. It is reseeded here, and the
+            initial embedding continues its stream. If None, a new one.
 
         Returns
         -------
@@ -545,6 +702,8 @@ class RATS:
 
         """
 
+        if rng is None:
+            rng = np.random.RandomState()
         n = self.neighborhood_graph_sym.shape[0]
         if self.eta_min > 1:
             c, n_C = best(
@@ -581,15 +740,15 @@ class RATS:
             Utilde = C.dot(self.U)
             Utilde.sort_indices() # determinism
 
-            np.random.seed(42)
-            self.param.noise_seed = np.random.randint(M * M, size=M)
+            rng.seed(self._seed)
+            self.param.noise_seed = rng.randint(M * M, size=M)
         else:
             c = np.arange(n, dtype=int)
             C = csr_matrix((np.ones(n), (c, np.arange(n))), shape=(n, n), dtype=bool)
             n_C = np.ones(n, dtype=int)
             Utilde = self.U.copy()
-            np.random.seed(42)
-            self.param.noise_seed = np.random.randint(n * n, size=n)
+            rng.seed(self._seed)
+            self.param.noise_seed = rng.randint(n * n, size=n)
 
         self.Utilde = Utilde
         self.C = C
@@ -597,13 +756,17 @@ class RATS:
 
         return n_C
 
-    def _fit_global_views(self, n_C):
+    def _fit_global_views(self, n_C, rng=None):
         """Align intermediate clusters via Riemannian gradient descent.
 
         Parameters
         ----------
         n_C: array-like, shape (n_clusters)
             Holds the number of datapoints per cluster.
+
+        rng : numpy.random.RandomState, default=None
+            The random generator of the fit, as left by
+            ``_fit_intermediate_views``.
 
         Returns
         -------
@@ -650,6 +813,8 @@ class RATS:
             self.n_repel,
             self.global_init_algo_name,
             self.verbose,
+            rng=rng,
+            random_state=self._seed,
         )
 
         _ = add_spacing_between_clusters(
@@ -657,7 +822,7 @@ class RATS:
         )
 
         # apply RGD
-        y_final, self.Utildeg, labels = compute_final_embedding(
+        y_final, self.Utildeg, labels, self.Utilde_t = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -676,6 +841,7 @@ class RATS:
             self.far_off_points,
             self.seq_of_intermed_views_in_cluster,
             self.verbose,
+            return_incidence=True,
         )
 
         return y_final, labels
