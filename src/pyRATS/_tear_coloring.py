@@ -21,6 +21,7 @@ def compute_color_of_pts_on_tear(
     verbose,
     n_jobs,
     i_mat_in_emb=None,
+    random_state=42,
 ):
 
     return compute_spectral_color_of_pts_on_tear(
@@ -35,6 +36,7 @@ def compute_color_of_pts_on_tear(
         verbose,
         n_jobs,
         i_mat_in_emb=i_mat_in_emb,
+        random_state=random_state,
     )
 
 
@@ -53,6 +55,7 @@ def compute_spectral_color_of_pts_on_tear(
     color_cutoff_frac2=0.0,
     i_mat_in_emb=None,  # incidence matrix in the embedding |#views| x |#points|
     return_tear_graph_info=False,
+    random_state=42,  # seed of the starting vector of eigsh in every component
 ):
 
     pts_across_tear, tear_graph = compute_tear_graph(
@@ -105,8 +108,9 @@ def compute_spectral_color_of_pts_on_tear(
         tear_graph_comp_i = laplacian(tear_graph_comp_i.astype("float"))
 
         # Compute color of points on the points in the i-th component of the tear graph
-        np.random.seed(42)
-        v0 = np.random.uniform(0, 1, tear_graph_comp_i.shape[0])
+        v0 = np.random.RandomState(random_state).uniform(
+            0, 1, tear_graph_comp_i.shape[0]
+        )
         n_eigs = min(n_comp_i - 1, max_diversity)
         _, colors_ = scipy.sparse.linalg.eigsh(
             tear_graph_comp_i, v0=v0, k=n_eigs, sigma=-1e-3

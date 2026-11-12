@@ -61,3 +61,7 @@ jobs:
     # Step 4: Pytest E2E Snapshot Assertions
     - name: Run Pytest Comparison
       run: pytest tests/test_e2e.py
+
+    # Step 5: Unit tests of the random_state parameter
+    - name: Run random_state tests
+      run: pytest tests/test_random_state.py
