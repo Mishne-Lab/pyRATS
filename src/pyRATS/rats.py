@@ -3,6 +3,7 @@ import numpy as np
 import warnings
 from scipy.sparse import csr_matrix
 from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
 
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
@@ -350,6 +351,7 @@ class RATS:
         # reseeded.
         self._seed = _check_random_seed(self.random_state)
         rng = np.random.RandomState(self._seed)
+        self._transform_nn = None  # the neighbor index of transform, rebuilt for every fit
 
         n_steps = 5 if self.to_postprocess else 4
         current_step = 1
@@ -446,22 +448,111 @@ class RATS:
         self.fit_transform(X, condition_num)
         return self
 
-    def transform(self, X):
-        """Apply the fitted embedding to new data X.
+    def transform(self, X, return_residual=False):
+        """Embed new points with the local views of the fitted model.
+
+        Every point gets the coordinates that the fitted views give it: the
+        local (kernel) PCA of each view it belongs to, with the rotation and
+        translation the alignment found for that view, averaged over its views
+        as the fit averages its own points. The fitted embedding does not
+        change, and points of the training data get their own coordinates.
+
+        A new point belongs to the views of the training points that would
+        have it among their ``n_neighbors`` nearest neighbors. With tearing,
+        only the views that contain its nearest training point are kept, so
+        that a point near the tear lands on the side of that neighbor. A point
+        that no training point would count as a neighbor (far from the data)
+        is embedded with the views of its nearest training point, and a
+        warning says how many there were. A point equal to a training point
+        gets that point's views.
 
         Parameters
         ----------
         X : array-like, shape (n_samples, n_features)
-            New data to embed.
+            Points to embed, with the features of the training data.
+
+        return_residual : bool, default=False
+            If True, also return, for every point, its mean distance to the
+            affine subspaces of its views (the local mean plus the span of the
+            local principal directions), in the units of X. Large values flag
+            points off the fitted manifold. Only with ``kernel=None``.
 
         Returns
         -------
-        y : array-like, shape (n_samples, d)
-            X transformed in the new space.
+        y : ndarray, shape (n_samples, n_components)
+            The points in the embedding.
+
+        residual : ndarray, shape (n_samples,)
+            Only if ``return_residual`` is True.
         """
-        raise NotImplementedError(
-            "transform() is not yet implemented. Use fit_transform() instead."
-        )
+        if getattr(self, "Utilde_t", None) is None:
+            raise RuntimeError(
+                "This RATS instance is not fitted yet. Call fit or fit_transform first."
+            )
+        X = np.asarray(X, dtype=float)
+        X_train = self.param.X
+        if X.ndim != 2 or X.shape[1] != X_train.shape[1]:
+            raise ValueError(
+                f"X must have shape (n_samples, {X_train.shape[1]}), got {X.shape}."
+            )
+        if return_residual and self.param.algo != "lpca":
+            raise NotImplementedError("return_residual requires kernel=None.")
+
+        # The training points that would have each new point among their k
+        # nearest neighbors (k-th neighbor distance r_k), and the nearest one.
+        r_k = self.neigh_dist[:, self.k - 1]
+        if getattr(self, "_transform_nn", None) is None:
+            self._transform_nn = NearestNeighbors(
+                metric=self.metric, n_jobs=self.n_jobs
+            ).fit(X_train)
+        dist_near, near = self._transform_nn.kneighbors(X, n_neighbors=1)
+        dist_near, near = dist_near[:, 0], near[:, 0]
+        dist, ind = self._transform_nn.radius_neighbors(X, radius=r_k.max())
+
+        incidence = self.Utilde_t.tocsc()  # views x training points
+        views_of = lambda i: incidence.indices[incidence.indptr[i] : incidence.indptr[i + 1]]
+        views, n_far = [], 0
+        for q in range(len(X)):
+            side = views_of(near[q])
+            if dist_near[q] == 0:
+                views.append(side)  # a training point: its own views
+                continue
+            js = ind[q][dist[q] <= r_k[ind[q]]]
+            V = np.unique(self.c[js])
+            if len(V) == 0:
+                n_far += 1
+                V = side
+            elif self.to_tear:
+                V_side = np.intersect1d(V, side)
+                V = V_side if len(V_side) else side
+            views.append(V)
+        if n_far:
+            warnings.warn(
+                f"{n_far} of {len(X)} points are not among the n_neighbors nearest "
+                "neighbors of any training point; they were embedded with the "
+                "views of their nearest training point.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Average the predictions of the views, grouped by view.
+        by_view = {}
+        for q, V in enumerate(views):
+            for m in V:
+                by_view.setdefault(int(m), []).append(q)
+        y = np.zeros((len(X), self.d))
+        n_views = np.zeros(len(X))
+        residual = np.zeros(len(X)) if return_residual else None
+        for m, qs in by_view.items():
+            qs = np.asarray(qs)
+            y[qs] += self.param.eval_new_(m, X[qs])
+            n_views[qs] += 1
+            if return_residual:
+                residual[qs] += self.param.residual_new_(m, X[qs])
+        y /= n_views[:, None]
+        if return_residual:
+            return y, residual / n_views
+        return y
 
     def inverse_transform(self, y):
         """Map points from the embedding space back to the original space.

@@ -2367,6 +2367,48 @@ class Param:
                 temp = temp + self.v[[k], :]
             return temp
 
+    def eval_new_(self, view_index, X_new):
+        """Maps new points (rows of X_new, not indices into the training
+        data) through the parameterization of a view, with its scale,
+        rotation and translation. Same arithmetic as eval_, without the
+        training-time noise.
+
+        Parameters
+        ------
+        view_index : int
+            The index of the parameterization to use.
+
+        X_new : array-like, shape (n_points, n_features)
+            Points to map to the embedding.
+        """
+        k = view_index
+        if self.algo == "lpca":
+            temp = np.dot(X_new - self.mu[k, :][np.newaxis, :], self.Psi[k, :, :])
+        else:
+            if self.standardize:
+                raise NotImplementedError(
+                    "New points cannot be mapped with standardized local views."
+                )
+            temp = self.model[k].transform(X_new)
+        if self.add_dim:
+            temp = np.concatenate([temp, np.zeros((temp.shape[0], 1))], axis=1)
+        if self.b is None:
+            return temp
+        temp = self.b[k] * temp
+        if self.T is not None:
+            temp = np.dot(temp, self.T[k, :, :])
+        if self.v is not None:
+            temp = temp + self.v[[k], :]
+        return temp
+
+    def residual_new_(self, view_index, X_new):
+        """Distance from each new point to the affine subspace of a linear
+        local view (its mean plus the span of its principal directions)."""
+        k = view_index
+        Z = X_new - self.mu[k, :][np.newaxis, :]
+        P = self.Psi[k, :, :]
+        return np.linalg.norm(Z - np.dot(np.dot(Z, P), P.T), axis=1)
+
     def replace_(self, new_param_ind):
         """Re-orders the parameterizations.
 
