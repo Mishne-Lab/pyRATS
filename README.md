@@ -114,6 +114,19 @@ Y = {s: rats.RATS(random_state=s).fit_transform(X) for s in (42, 0, 1, 2)}
 print({s: round(shift(Y[42], Y[s]), 3) for s in (0, 1, 2)})
 ```
 
+# Embedding new points
+After a fit, `transform` embeds new points without changing the embedding. Each point gets the coordinates that the fitted local views give it, averaged as for the training points; near a tear, a point stays on the side of its nearest training point.
+
+```py
+model = rats.RATS(n_components=2, tear=True).fit(X_train)
+y_new = model.transform(X_new)
+
+# the distance of each point to its local views, which flags points off the manifold
+y_new, residual = model.transform(X_new, return_residual=True)
+```
+
+`transform(X_train)` reproduces `model.embedding_`. A point farther from the data than any training point's `n_neighbors`-th neighbor is embedded with the views of its nearest training point, with a warning.
+
 
 Citation
 ----------
