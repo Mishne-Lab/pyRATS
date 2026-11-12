@@ -381,6 +381,7 @@ class RATS:
         if self.verbose:
             print(f"[{current_step}/{n_steps}] Aligning global views...")
         y, labels = self._fit_global_views(n_C, rng)
+        self.embedding_ = y
         if labels is not None:
             return y, labels
         return y
@@ -425,21 +426,25 @@ class RATS:
             random_state=getattr(self, "_seed", 42),
         )
 
-    def fit(self, X):
+    def fit(self, X, condition_num=None):
         """Fit the model on X without returning the embedding.
+
+        The embedding is stored in ``embedding_``.
 
         Parameters
         ----------
         X : array-like, shape (n_samples, n_features)
             Sample data.
 
+        condition_num :
+            As in ``fit_transform``.
+
         Returns
         -------
         self
         """
-        raise NotImplementedError(
-            "fit() is not yet implemented. Use fit_transform() instead."
-        )
+        self.fit_transform(X, condition_num)
+        return self
 
     def transform(self, X):
         """Apply the fitted embedding to new data X.
