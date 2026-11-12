@@ -726,7 +726,7 @@ class RATS:
         )
 
         # apply RGD
-        y_final, self.Utildeg, labels = compute_final_embedding(
+        y_final, self.Utildeg, labels, self.Utilde_t = compute_final_embedding(
             y_init,
             self.d,
             self.Utilde,
@@ -745,6 +745,7 @@ class RATS:
             self.far_off_points,
             self.seq_of_intermed_views_in_cluster,
             self.verbose,
+            return_incidence=True,
         )
 
         return y_final, labels

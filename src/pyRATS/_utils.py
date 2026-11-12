@@ -1417,6 +1417,7 @@ def compute_final_embedding(
     far_off_points,
     seq_of_intermed_views_in_cluster,
     verbose,
+    return_incidence=False,
 ):
     """Align clusters via Riemannian Gradient Descent.
 
@@ -1470,6 +1471,10 @@ def compute_final_embedding(
 
         verbose : bool
             If True, print logs to stdout.
+
+        return_incidence : bool, default=False
+            If True, also return the incidence matrix (views x points) used in
+            the last alignment step.
 
         Returns
         ------
@@ -1533,9 +1538,16 @@ def compute_final_embedding(
 
     if to_tear:
         Utildeg = compute_incidence_matrix_in_embedding(y, C, k, nu)
-        return y, Utildeg, labels
+        out = (y, Utildeg, labels)
+    else:
+        out = (y, None, labels)
 
-    return y, None, labels
+    if return_incidence:
+        # The incidence used in the last alignment step (Utilde restricted by
+        # the tear): the embedding of each point is the mean of what these
+        # views give it. Utildeg above is recomputed from the final embedding.
+        return out + (Utilde_t,)
+    return out
 
 
 def rgd_alignment(
